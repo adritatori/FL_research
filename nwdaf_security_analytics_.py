@@ -897,8 +897,11 @@ class ExperimentRunner:
         # --- 1. Initialize Ray ---
         if ray.is_initialized():
             ray.shutdown()
-        ray.init(num_cpus=os.cpu_count(), log_to_driver=False, ignore_reinit_error=True)
-        print(f"\nRay initialized on {os.cpu_count()} CPUs. 🔥\n")
+        # CRITICAL FIX: Limit to 1 CPU to prevent OOM (Out-Of-Memory) errors
+        # Ray workers crash when too many run in parallel due to memory constraints
+        ray.init(num_cpus=1, log_to_driver=False, ignore_reinit_error=True)
+        print(f"\nRay initialized on 1 CPU (limited to prevent OOM errors). 🔥")
+        print(f"Note: Experiments will run sequentially instead of in parallel.\n")
 
         # --- 2. Put shared data into Ray's object store ---
         X_train_ref = ray.put(X_train)
