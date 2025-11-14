@@ -512,12 +512,14 @@ def run_single_experiment(
 
             tracker.log_round(round_num, round_metrics)
 
+            # Extract metrics for this round
+            f1 = round_metrics.get('f1', 0.0)
+            loss = round_metrics.get('loss', 0.0)
+            acc = round_metrics.get('accuracy', 0.0)
+            time_elapsed = round_metrics['timestamp']
+
             # Print progress every 10 rounds or last round
             if round_num % 10 == 0 or round_num == num_rounds:
-                f1 = round_metrics.get('f1', 0.0)
-                loss = round_metrics.get('loss', 0.0)
-                acc = round_metrics.get('accuracy', 0.0)
-                time_elapsed = round_metrics['timestamp']
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] Round {round_num}/{num_rounds}: "
                       f"F1={f1:.4f}, Loss={loss:.4f}, Acc={acc:.4f}, Time={time_elapsed:.1f}s")
 
