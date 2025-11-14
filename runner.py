@@ -33,28 +33,28 @@ from metrics import MetricsTracker, compute_comprehensive_metrics, aggregate_cli
 # NEURAL NETWORK MODEL
 # ============================================================================
 
-class IntrusionDetectionMLP(nn.Module):
-    """MLP for binary intrusion detection"""
+def __init__(self, input_dim: int, hidden_dims: List[int] = [128, 64, 32], dropout: float = 0.3):
 
-    def __init__(self, input_dim: int, hidden_dims: List[int] = [128, 64, 32],
-                 dropout: float = 0.3):
         super().__init__()
-
         layers = []
         prev_dim = input_dim
 
         for hidden_dim in hidden_dims:
+            # Calculate number of groups for GroupNorm
+            # Use 32 groups if possible, otherwise use divisors
+            if hidden_dim >= 32 and hidden_dim % 32 == 0:
+                num_groups = 32
+            elif hidden_dim >= 16 and hidden_dim % 16 == 0:
+                num_groups = 16
+            elif hidden_dim >= 8 and hidden_dim % 8 == 0:
+                num_groups = 8
+            elif hidden_dim >= 4 and hidden_dim % 4 == 0:
+                num_groups = 4
+            else:
+                num_groups = 1
             layers.extend([
                 nn.Linear(prev_dim, hidden_dim),
-                nn.BatchNorm1d(hidden_dim),
-                nn.LeakyReLU(0.2),
-                nn.Dropout(dropout)
-            ])
-            prev_dim = hidden_dim
-
-        layers.append(nn.Linear(prev_dim, 1))
-
-        self.network = nn.Sequential(*layers)
+                nn.GroupNorm(num_groups, hidden_dim)
 
     def forward(self, x):
         return self.network(x)
