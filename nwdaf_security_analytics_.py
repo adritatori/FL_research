@@ -1,172 +1,152 @@
-# -*- coding: utf-8 -*-
 """
-NWDAF Security Analytics for 5G Networks
-Federated Learning + Differential Privacy + Byzantine Robustness
+Q1-Quality NWDAF FL+DP Experiment with Pilot Study
+===================================================
+Federated Learning with Differential Privacy on UNSW-NB15 Dataset
 
-Research Questions:
-- RQ1: Privacy-Utility Trade-off
-- RQ2: Robustness Under Attacks
-- RQ3: Operational Costs
-- RQ4: Multi-Objective Optimization
+MODES:
+- PILOT: 16 experiments (~30-60 min) - Quick validation
+- FOCUSED: 36 experiments (~2-3 hours) - Targeted analysis
+- FULL: 108 experiments (~4-8 hours) - Complete grid
 
-Dataset: UNSW-NB15 Intrusion Detection Dataset
-
-Requirements:
-    pip install flwr[simulation] ray pandas scikit-learn torch torchvision opacus psutil
+Author: Research Team
 """
-
-# ============================================================================
-# IMPORTS
-# ============================================================================
 
 import os
 import sys
-import json
 import time
-import pickle
-import psutil  # Make sure to pip install psutil
-import warnings
+import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import List, Tuple, Dict, Optional
 from collections import defaultdict
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from mpl_toolkits.mplot3d import Axes3D
 
-# ML libraries
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    roc_auc_score, confusion_matrix, classification_report
-)
-
-# PyTorch
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
-# Federated Learning
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import (accuracy_score, precision_score, recall_score,
+                              f1_score, roc_auc_score)
+
 import flwr as fl
-from flwr.common import Metrics, NDArrays, Scalar
-from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
-# --- FIX: Only import FedAvg, as we will define the others manually ---
+from flwr.common import NDArrays, Scalar, Parameters, Metrics
+from flwr.common import parameters_to_ndarrays, ndarrays_to_parameters
 from flwr.server.strategy import FedAvg
 
-# Differential Privacy
 from opacus import PrivacyEngine
-from opacus.validators import ModuleValidator
 
-# Parallelization
-import ray  # Make sure to pip install ray
-
-warnings.filterwarnings('ignore')
-sns.set_style('whitegrid')
-
+import psutil
+from joblib import Parallel, delayed
 
 # ============================================================================
-# CONFIGURATION
+# CONFIGURATION WITH PILOT STUDY SUPPORT
 # ============================================================================
 
 class ExperimentConfig:
-    """Centralized configuration for reproducibility
+    """Centralized configuration with pilot/focused/full modes"""
 
-    EXPERIMENTAL DESIGN JUSTIFICATION:
-    ==================================
-
-    This configuration balances statistical rigor with computational feasibility:
-
-    1. ROUNDS (20):
-       - Literature shows FL convergence typically occurs within 10-30 rounds
-       - 20 rounds sufficient to demonstrate privacy-utility trade-offs
-       - Reduces runtime by 2.5x vs 50 rounds
-
-    2. EPSILON VALUES (3: [1.0, 5.0, ∞]):
-       - ε=1.0: Strong privacy (GDPR-compatible, strict DP)
-       - ε=5.0: Moderate privacy (practical industry standard)
-       - ε=∞: No DP (baseline for maximum utility)
-       - Covers full spectrum from strict to no privacy
-
-    3. MALICIOUS FRACTIONS (2: [0.0, 0.2]):
-       - 0.0: Clean baseline (no attacks)
-       - 0.2: Realistic threat model (20% Byzantine clients)
-       - Literature: Byzantine-robust FL typically assumes ≤30% malicious
-
-    4. ATTACK TYPES (2: [none, label_flip]):
-       - 'none': Baseline performance
-       - 'label_flip': Most impactful data poisoning attack
-       - Omitted: 'sign_flip', 'random_noise' (less realistic in practice)
-
-    5. AGGREGATORS (3: [fedavg, trimmed_mean, median]):
-       - FedAvg: Standard baseline (no robustness)
-       - Trimmed Mean: Robust + efficient (O(n log n))
-       - Median: Maximum robustness (coordinate-wise)
-       - Omitted: Krum (O(n²d) too slow, d=model dimensions)
-
-    TOTAL: 3 ε × 2 α × 2 attacks × 3 aggregators × 3 runs = 108 experiments
-    Estimated runtime: 4-8 hours (vs 40-80 hours for full grid)
-
-    This design enables answering all 4 research questions (RQ1-RQ4):
-    - RQ1: Privacy-utility trade-off (3 epsilon values)
-    - RQ2: Robustness analysis (2 malicious fractions, 3 aggregators)
-    - RQ3: Operational costs (latency tracking across all configs)
-    - RQ4: Multi-objective Pareto frontier (F1 vs privacy vs latency)
-    """
+    # ========================================================================
+    # EXPERIMENT MODE SELECTION
+    # ========================================================================
+    EXPERIMENT_MODE = 'pilot'  # Options: 'pilot', 'focused', 'full'
 
     # Paths
-    # UPDATE THIS PATH to point to your UNSW-NB15 dataset directory
-    # Download from: https://research.unsw.edu.au/projects/unsw-nb15-dataset
-    DATA_PATH = './data/UNSW-NB15'
+    DATA_PATH = '/content/drive/MyDrive/IDSDatasets/UNSW 15'
     RESULTS_DIR = './results'
     LOGS_DIR = './logs'
 
-    # Random seeds for reproducibility
+    # Random seeds
     RANDOM_SEED = 42
 
     # Dataset parameters
     TEST_SIZE = 0.2
-    VAL_SIZE = 0.1  # From training set
+    VAL_SIZE = 0.1
 
     # Federated Learning parameters
-    NUM_CLIENTS = 5
-    NUM_ROUNDS = 20  # Reduced from 50 for faster experiments
+    NUM_CLIENTS = 3
     CLIENT_FRACTION = 1.0
-    MIN_FIT_CLIENTS = 5
-    MIN_AVAILABLE_CLIENTS = 5
+    MIN_FIT_CLIENTS = 2
+    MIN_AVAILABLE_CLIENTS = 2
 
-    # Local training parameters
-    LOCAL_EPOCHS = 1
-    BATCH_SIZE = 64
+    # Local training
+    LOCAL_EPOCHS = 10
+    BATCH_SIZE = 128
     LEARNING_RATE = 0.001
 
-    # Differential Privacy parameters
-    # Reduced from 6 to 3 values: low (ε=1.0), medium (ε=5.0), no-DP (ε=∞)
-    EPSILON_VALUES = [1.0, 5.0, float('inf')]  # inf = no DP
+    # Differential Privacy
     TARGET_DELTA = 1e-5
     MAX_GRAD_NORM = 1.0
-
-    # Robustness parameters
-    # Reduced to compare clean (0.0) vs 20% malicious (0.2)
-    MALICIOUS_FRACTIONS = [0.0, 0.2]
-    # Focus on most impactful attacks: none and label_flip
-    ATTACK_TYPES = ['none', 'label_flip']
-    # Removed Krum due to O(n²) complexity
-    AGGREGATORS = ['fedavg', 'trimmed_mean', 'median']
-    TRIM_RATIO = 0.1  # For trimmed mean
 
     # Model parameters
     HIDDEN_DIMS = [128, 64, 32]
     DROPOUT_RATE = 0.2
-
-    # Experiment parameters
-    NUM_RUNS = 3  # Multiple runs for statistical significance
+    TRIM_RATIO = 0.1
 
     # Device
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # ========================================================================
+    # MODE-SPECIFIC CONFIGURATIONS
+    # ========================================================================
+    @classmethod
+    def get_config(cls):
+        """Return configuration based on EXPERIMENT_MODE"""
+
+        if cls.EXPERIMENT_MODE == 'pilot':
+            return {
+                'name': 'PILOT STUDY',
+                'description': 'Quick validation - identifies best configs',
+                'num_rounds': 5,
+                'epsilon_values': [float('inf')],  # DP vs no-DP
+                'malicious_fractions': [0.0, 0.2],
+                'attack_types': ['none', 'label_flip'],
+                'aggregators': ['fedavg', 'trimmed_mean'],
+                'num_runs': 1,
+                'use_sample': True,
+                'sample_fraction': 0.2,
+                'total_experiments': 1,  # 2×2×2×2×2
+                'estimated_time': '30-60 minutes'
+            }
+
+        elif cls.EXPERIMENT_MODE == 'focused':
+            return {
+                'name': 'FOCUSED STUDY',
+                'description': 'Targeted analysis on promising configs',
+                'num_rounds': 15,
+                'epsilon_values': [float('inf')],
+                'malicious_fractions': [0.0, 0.2],
+                'attack_types': ['none', 'label_flip'],
+                'aggregators': ['fedavg', 'trimmed_mean'],
+                'num_runs': 3,
+                'use_sample': True,
+                'sample_fraction': 0.1,
+                'total_experiments': 36,  # 3×2×2×2×3
+                'estimated_time': '2-3 hours'
+            }
+
+        else:  # 'full'
+            return {
+                'name': 'FULL STUDY',
+                'description': 'Complete experimental grid',
+                'num_rounds': 20,
+                'epsilon_values': [1.0, 5.0, float('inf')],
+                'malicious_fractions': [0.0, 0.2],
+                'attack_types': ['none', 'label_flip'],
+                'aggregators': ['fedavg', 'trimmed_mean', 'median'],
+                'num_runs': 3,
+                'use_sample': False,
+                'sample_fraction': 1.0,
+                'total_experiments': 108,  # 3×2×2×3×3
+                'estimated_time': '4-8 hours'
+            }
 
     @classmethod
     def setup_directories(cls):
@@ -182,6 +162,27 @@ class ExperimentConfig:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
+
+    @classmethod
+    def print_mode_info(cls):
+        """Print current mode configuration"""
+        cfg = cls.get_config()
+        print("\n" + "="*80)
+        print(f"EXPERIMENT MODE: {cfg['name']}")
+        print("="*80)
+        print(f"Description: {cfg['description']}")
+        print(f"Total experiments: {cfg['total_experiments']}")
+        print(f"Estimated time: {cfg['estimated_time']}")
+        print(f"\nParameters:")
+        print(f"  Rounds: {cfg['num_rounds']}")
+        print(f"  Epsilon values: {cfg['epsilon_values']}")
+        print(f"  Malicious fractions: {cfg['malicious_fractions']}")
+        print(f"  Attack types: {cfg['attack_types']}")
+        print(f"  Aggregators: {cfg['aggregators']}")
+        print(f"  Runs per config: {cfg['num_runs']}")
+        if cfg['use_sample']:
+            print(f"  Dataset sample: {cfg['sample_fraction']*100:.0f}%")
+        print("="*80 + "\n")
 
 config = ExperimentConfig()
 config.setup_directories()
@@ -199,8 +200,9 @@ class UNSWDataLoader:
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
 
-    def load_and_preprocess(self) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-        """Load UNSW-NB15 dataset"""
+    def load_and_preprocess(self, use_sample: bool = False,
+                           sample_fraction: float = 1.0) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+        """Load UNSW-NB15 dataset with optional sampling"""
         print("=" * 80)
         print("LOADING UNSW-NB15 DATASET")
         print("=" * 80)
@@ -235,20 +237,20 @@ class UNSWDataLoader:
 
         print(f"✓ Dataset loaded: {df.shape[0]} samples, {df.shape[1]} features")
 
-        # Display basic info
-        print(f"\nColumns: {df.columns.tolist()[:10]}... (showing first 10)")
+        # Sample if requested
+        if use_sample and sample_fraction < 1.0:
+            original_size = len(df)
+            df = df.sample(frac=sample_fraction, random_state=config.RANDOM_SEED)
+            print(f"✓ Using {sample_fraction*100:.0f}% sample: {len(df):,} of {original_size:,} samples")
 
-        # Handle label column (different naming conventions)
-        label_col = 'label'  # Direct assignment
-
+        # Handle label column
+        label_col = 'label'
         print(f"✓ Using label column: '{label_col}'")
 
-        # Create binary labels
         y = df[label_col].values
 
         # Remove non-feature columns
         drop_cols = ['id', 'attack_cat', 'label']
-        # Drop columns that exist, ignore errors if they don't
         X = df.drop(columns=drop_cols, errors='ignore')
 
         # Handle categorical features
@@ -258,11 +260,9 @@ class UNSWDataLoader:
                 le = LabelEncoder()
                 X[col] = le.fit_transform(X[col].astype(str))
 
-        # Convert to numpy
         feature_names = list(X.columns)
 
         # Handle missing/infinite values
-        # Convert all to numeric, coercing errors to NaN
         X = X.apply(pd.to_numeric, errors='coerce')
         X = np.nan_to_num(X.values, nan=0.0, posinf=1e10, neginf=-1e10)
 
@@ -282,7 +282,7 @@ class UNSWDataLoader:
 # ============================================================================
 
 class FederatedDataPartitioner:
-    """Partition data across clients with different strategies"""
+    """Partition data across clients"""
 
     @staticmethod
     def iid_partition(X: np.ndarray, y: np.ndarray, num_clients: int) -> List[Tuple]:
@@ -296,42 +296,15 @@ class FederatedDataPartitioner:
 
         return partitions
 
-    @staticmethod
-    def non_iid_partition(X: np.ndarray, y: np.ndarray, num_clients: int,
-                            alpha: float = 0.5) -> List[Tuple]:
-        """Non-IID partitioning using Dirichlet distribution"""
-        num_classes = len(np.unique(y))
-        client_data = [[] for _ in range(num_clients)]
-
-        for class_idx in range(num_classes):
-            class_indices = np.where(y == class_idx)[0]
-            np.random.shuffle(class_indices)
-
-            # Dirichlet distribution
-            proportions = np.random.dirichlet(alpha=np.repeat(alpha, num_clients))
-            proportions = (np.cumsum(proportions) * len(class_indices)).astype(int)[:-1]
-
-            splits = np.split(class_indices, proportions)
-            for client_idx, split in enumerate(splits):
-                client_data[client_idx].extend(split)
-
-        partitions = []
-        for indices in client_data:
-            indices = np.array(indices)
-            np.random.shuffle(indices)
-            partitions.append((X[indices], y[indices]))
-
-        return partitions
-
 # ============================================================================
 # NEURAL NETWORK MODEL
 # ============================================================================
 
 class IntrusionDetectionMLP(nn.Module):
-    """MLP for binary intrusion detection"""
+    """MLP for binary intrusion detection - FIXED"""
 
     def __init__(self, input_dim: int, hidden_dims: List[int] = [128, 64, 32],
-                 dropout: float = 0.2):
+                 dropout: float = 0.3):  # Increased dropout
         super().__init__()
 
         layers = []
@@ -340,14 +313,14 @@ class IntrusionDetectionMLP(nn.Module):
         for hidden_dim in hidden_dims:
             layers.extend([
                 nn.Linear(prev_dim, hidden_dim),
-                nn.GroupNorm(num_groups=min(32, hidden_dim), num_channels=hidden_dim),  # DP-compatible
-                nn.ReLU(),
+                nn.BatchNorm1d(hidden_dim),  # ✅ Changed from GroupNorm
+                nn.LeakyReLU(0.2),           # ✅ Changed from ReLU
                 nn.Dropout(dropout)
             ])
             prev_dim = hidden_dim
 
         layers.append(nn.Linear(prev_dim, 1))
-        layers.append(nn.Sigmoid())
+        # No sigmoid - BCEWithLogitsLoss handles it
 
         self.network = nn.Sequential(*layers)
 
@@ -365,12 +338,10 @@ class MetricsTracker:
         self.metrics = defaultdict(list)
 
     def log(self, **kwargs):
-        """Log metrics"""
         for key, value in kwargs.items():
             self.metrics[key].append(value)
 
     def get_summary(self) -> Dict:
-        """Get summary statistics"""
         summary = {}
         for key, values in self.metrics.items():
             if isinstance(values[0], (int, float)):
@@ -383,7 +354,6 @@ class MetricsTracker:
         return summary
 
     def save(self, filepath: str):
-        """Save metrics to file"""
         with open(filepath, 'w') as f:
             json.dump(dict(self.metrics), f, indent=2, default=str)
 
@@ -401,47 +371,68 @@ class BaseClient(fl.client.NumPyClient):
         self.trainloader = trainloader
         self.testloader = testloader
         self.config = config
-        self.criterion = nn.BCELoss()
+        
+        # Calculate pos_weight correctly
+        all_labels = []
+        for _, labels in trainloader:
+            all_labels.extend(labels.numpy().flatten())
+        all_labels = np.array(all_labels)
+        
+        num_class_0 = np.sum(all_labels == 0)
+        num_class_1 = np.sum(all_labels == 1)
+        
+        print(f"[Client {cid}] Training data: {num_class_0} class-0, {num_class_1} class-1")
+        
+        if num_class_1 > 0:
+            pos_weight = torch.tensor([num_class_0 / num_class_1]).to(config.DEVICE)
+        else:
+            pos_weight = torch.tensor([1.0]).to(config.DEVICE)
+        
+        print(f"[Client {cid}] pos_weight = {pos_weight.item():.4f}")
+            
+        self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         self.optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
         self.privacy_engine = None
-        self.metrics_tracker = MetricsTracker()
 
     def setup_dp(self, epsilon: float):
         """Setup differential privacy"""
         if epsilon == float('inf'):
-            return  # No DP
+            return
 
         self.privacy_engine = PrivacyEngine()
 
-        # Use make_private_with_epsilon to automatically calculate noise
+        cfg = self.config.get_config()
         self.model, self.optimizer, self.trainloader = self.privacy_engine.make_private_with_epsilon(
             module=self.model,
             optimizer=self.optimizer,
             data_loader=self.trainloader,
             target_epsilon=epsilon,
             target_delta=self.config.TARGET_DELTA,
-            epochs=self.config.LOCAL_EPOCHS,
+            epochs=cfg['num_rounds'] * self.config.LOCAL_EPOCHS,
             max_grad_norm=self.config.MAX_GRAD_NORM,
         )
 
     def get_parameters(self, config: Dict) -> NDArrays:
+        """Return model parameters as list of NumPy arrays"""
         return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
 
     def set_parameters(self, parameters: NDArrays):
+        """Set model parameters from list of NumPy arrays"""
         params_dict = zip(self.model.state_dict().keys(), parameters)
         state_dict = {k: torch.tensor(v) for k, v in params_dict}
         self.model.load_state_dict(state_dict, strict=True)
 
     def fit(self, parameters: NDArrays, config: Dict) -> Tuple[NDArrays, int, Dict]:
-        """Train the model"""
+        """Train the model on local data"""
         self.set_parameters(parameters)
         self.model.train()
 
-        # Operational metrics
         start_time = time.time()
         start_cpu = psutil.Process().cpu_times()
 
         total_loss = 0
+        num_batches = 0
+        
         for epoch in range(self.config.LOCAL_EPOCHS):
             for batch_idx, (data, target) in enumerate(self.trainloader):
                 data, target = data.to(self.config.DEVICE), target.to(self.config.DEVICE)
@@ -449,12 +440,29 @@ class BaseClient(fl.client.NumPyClient):
                 self.optimizer.zero_grad()
                 output = self.model(data)
                 loss = self.criterion(output, target)
+                
+                # DEBUG: First batch of first epoch
+                if epoch == 0 and batch_idx == 0:
+                    print(f"\n[Client {self.cid}] First training batch:")
+                    print(f"  Output range: [{output.min().item():.4f}, {output.max().item():.4f}]")
+                    print(f"  Loss: {loss.item():.4f}")
+                    print(f"  Target: {target.sum().item():.0f}/{len(target)} positives")
+                
                 loss.backward()
+                
+                # DEBUG: Check gradients
+                if epoch == 0 and batch_idx == 0:
+                    grad_norm = sum(p.grad.norm().item() for p in self.model.parameters() if p.grad is not None)
+                    print(f"  Gradient norm: {grad_norm:.4f}")
+                
                 self.optimizer.step()
 
                 total_loss += loss.item()
+                num_batches += 1
 
-        # Calculate metrics
+        avg_loss = total_loss / num_batches if num_batches > 0 else 0
+        print(f"[Client {self.cid}] Training done: avg_loss={avg_loss:.4f}")
+
         end_time = time.time()
         end_cpu = psutil.Process().cpu_times()
 
@@ -466,10 +474,9 @@ class BaseClient(fl.client.NumPyClient):
             'latency': end_time - start_time,
             'cpu_time': end_cpu.user - start_cpu.user,
             'bandwidth_bytes': param_size,
-            'avg_loss': total_loss / len(self.trainloader) if len(self.trainloader) > 0 else 0
+            'avg_loss': avg_loss
         }
 
-        # Privacy metrics
         if self.privacy_engine:
             epsilon = self.privacy_engine.get_epsilon(delta=self.config.TARGET_DELTA)
             metrics['epsilon_spent'] = epsilon
@@ -479,7 +486,7 @@ class BaseClient(fl.client.NumPyClient):
         return updated_params, len(self.trainloader.dataset), metrics
 
     def evaluate(self, parameters: NDArrays, config: Dict) -> Tuple[float, int, Dict]:
-        """Evaluate the model"""
+        """Evaluate the model on test data"""
         self.set_parameters(parameters)
         self.model.eval()
 
@@ -491,8 +498,11 @@ class BaseClient(fl.client.NumPyClient):
         with torch.no_grad():
             for data, target in self.testloader:
                 data, target = data.to(self.config.DEVICE), target.to(self.config.DEVICE)
-                output = self.model(data)
-                loss = self.criterion(output, target)
+      
+                logits = self.model(data)
+                output = torch.sigmoid(logits)
+                
+                loss = self.criterion(logits, target)
                 total_loss += loss.item()
 
                 probs = output.cpu().numpy()
@@ -502,7 +512,6 @@ class BaseClient(fl.client.NumPyClient):
                 all_preds.extend(preds.flatten())
                 all_labels.extend(target.cpu().numpy().flatten())
 
-        # Calculate metrics
         accuracy = accuracy_score(all_labels, all_preds)
         precision = precision_score(all_labels, all_preds, zero_division=0)
         recall = recall_score(all_labels, all_preds, zero_division=0)
@@ -512,7 +521,64 @@ class BaseClient(fl.client.NumPyClient):
             auc = roc_auc_score(all_labels, all_probs)
         except:
             auc = 0.5
+            
+        print(f"\n[DEBUG] Client {self.cid} Evaluation:")
+        print(f"  Total samples: {len(all_labels)}")
+        print(f"  Pred distribution: {np.bincount(np.array(all_preds).astype(int))}")
+        print(f"  True distribution: {np.bincount(np.array(all_labels).astype(int))}")
+        print(f"  Raw prob range: [{min(all_probs):.4f}, {max(all_probs):.4f}]")
+        
+        metrics = {
+            'accuracy': accuracy,
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'auc': auc,
+            'loss': total_loss / len(self.testloader) if len(self.testloader) > 0 else 0
+        }
 
+        return float(total_loss / len(self.testloader)) if len(self.testloader) > 0 else 0.0, len(self.testloader.dataset), metrics
+
+    def evaluate(self, parameters: NDArrays, config: Dict) -> Tuple[float, int, Dict]:
+        self.set_parameters(parameters)
+        self.model.eval()
+
+        all_preds = []
+        all_labels = []
+        all_probs = []
+        total_loss = 0
+
+        with torch.no_grad():
+            for data, target in self.testloader:
+                data, target = data.to(self.config.DEVICE), target.to(self.config.DEVICE)
+      
+                logits = self.model(data)  # Raw logits
+                output = torch.sigmoid(logits)  # Apply sigmoid for evaluation
+                
+                loss = self.criterion(logits, target)  # Loss uses raw logits
+                total_loss += loss.item()
+
+                probs = output.cpu().numpy()
+                preds = (output > 0.5).float().cpu().numpy()
+
+                all_probs.extend(probs.flatten())
+                all_preds.extend(preds.flatten())
+                all_labels.extend(target.cpu().numpy().flatten())
+
+        accuracy = accuracy_score(all_labels, all_preds)
+        precision = precision_score(all_labels, all_preds, zero_division=0)
+        recall = recall_score(all_labels, all_preds, zero_division=0)
+        f1 = f1_score(all_labels, all_preds, zero_division=0)
+
+        try:
+            auc = roc_auc_score(all_labels, all_probs)
+        except:
+            auc = 0.5
+        print(f"\n[DEBUG] Client {self.cid} Evaluation:")
+        print(f"  Total samples: {len(all_labels)}")
+        print(f"  Pred distribution: {np.bincount(np.array(all_preds).astype(int))}")
+        print(f"  True distribution: {np.bincount(np.array(all_labels).astype(int))}")
+        print(f"  Raw prob range: [{min(all_probs):.4f}, {max(all_probs):.4f}]")
         metrics = {
             'accuracy': accuracy,
             'precision': precision,
@@ -526,7 +592,7 @@ class BaseClient(fl.client.NumPyClient):
 
 
 class MaliciousClient(BaseClient):
-    """Client that performs attacks"""
+    """Client that performs label flip attack"""
 
     def __init__(self, cid: int, model: nn.Module, trainloader: DataLoader,
                  testloader: DataLoader, config: ExperimentConfig, attack_type: str):
@@ -535,19 +601,12 @@ class MaliciousClient(BaseClient):
         print(f"⚠️  Client {cid} is MALICIOUS (Attack: {attack_type})")
 
     def fit(self, parameters: NDArrays, config: Dict) -> Tuple[NDArrays, int, Dict]:
-        """Train with attack"""
-
         if self.attack_type == 'label_flip':
             return self._label_flip_attack(parameters, config)
-        elif self.attack_type == 'sign_flip':
-            return self._sign_flip_attack(parameters, config)
-        elif self.attack_type == 'random_noise':
-            return self._random_noise_attack(parameters, config)
         else:
             return super().fit(parameters, config)
 
     def _label_flip_attack(self, parameters: NDArrays, config: Dict):
-        """Flip all labels"""
         self.set_parameters(parameters)
         self.model.train()
 
@@ -555,9 +614,7 @@ class MaliciousClient(BaseClient):
 
         for epoch in range(self.config.LOCAL_EPOCHS):
             for data, target in self.trainloader:
-                # Flip labels
                 flipped_target = 1 - target
-
                 data = data.to(self.config.DEVICE)
                 flipped_target = flipped_target.to(self.config.DEVICE)
 
@@ -578,43 +635,12 @@ class MaliciousClient(BaseClient):
 
         return updated_params, len(self.trainloader.dataset), metrics
 
-    def _sign_flip_attack(self, parameters: NDArrays, config: Dict):
-        """Flip gradient signs"""
-        _, num_samples, metrics = super().fit(parameters, config)
-
-        updated_params = self.get_parameters(config={})
-        flipped_params = [-3.0 * p for p in updated_params]
-
-        metrics['attack_type'] = 'sign_flip'
-        return flipped_params, num_samples, metrics
-
-    def _random_noise_attack(self, parameters: NDArrays, config: Dict):
-        """Send random noise"""
-        start_time = time.time()
-
-        # Generate random parameters
-        random_params = [np.random.randn(*p.shape).astype(np.float32) for p in parameters]
-
-        latency = time.time() - start_time
-        metrics = {
-            'client_id': self.cid,
-            'latency': latency,
-            'attack_type': 'random_noise'
-        }
-
-        return random_params, len(self.trainloader.dataset), metrics
-
-
 # ============================================================================
-# ROBUST AGGREGATION STRATEGIES (FIX: ADDING CUSTOM CLASSES BACK)
+# ROBUST AGGREGATION STRATEGIES
 # ============================================================================
 
 class TrimmedMeanStrategy(FedAvg):
-    """Optimized Trimmed mean aggregation strategy
-
-    Uses vectorized operations for coordinate-wise trimmed mean.
-    Complexity: O(n log n) per layer where n = number of clients.
-    """
+    """Trimmed mean aggregation"""
 
     def __init__(self, trim_ratio: float = 0.1, **kwargs):
         super().__init__(**kwargs)
@@ -630,13 +656,11 @@ class TrimmedMeanStrategy(FedAvg):
         if not results:
             return None, {}
 
-        # Convert results to weights
         weights_results = [
             (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples)
             for _, fit_res in results
         ]
 
-        # OPTIMIZED: Vectorized trimmed mean
         weights = [w for w, _ in weights_results]
         aggregated = []
         trim_count = int(self.trim_ratio * len(weights))
@@ -645,8 +669,6 @@ class TrimmedMeanStrategy(FedAvg):
             layer_weights = np.stack([w[layer_idx] for w in weights])
 
             if trim_count > 0 and trim_count < len(weights) // 2:
-                # Use np.partition for O(n) instead of O(n log n) sort
-                # Partition finds the k-th smallest elements efficiently
                 sorted_weights = np.sort(layer_weights, axis=0)
                 trimmed = sorted_weights[trim_count:-trim_count]
                 aggregated_layer = np.mean(trimmed, axis=0)
@@ -657,7 +679,6 @@ class TrimmedMeanStrategy(FedAvg):
 
         parameters_aggregated = ndarrays_to_parameters(aggregated)
 
-        # Aggregate metrics
         metrics_aggregated = {}
         if self.fit_metrics_aggregation_fn:
             fit_metrics = [(res.num_examples, res.metrics) for _, res in results]
@@ -667,12 +688,7 @@ class TrimmedMeanStrategy(FedAvg):
 
 
 class MedianStrategy(FedAvg):
-    """Optimized Coordinate-wise median aggregation strategy
-
-    Uses vectorized np.median with axis parameter for efficient computation.
-    Provides maximum robustness against Byzantine attacks.
-    Complexity: O(n log n) per layer where n = number of clients.
-    """
+    """Coordinate-wise median aggregation"""
 
     def aggregate_fit(
         self,
@@ -689,19 +705,16 @@ class MedianStrategy(FedAvg):
             for _, fit_res in results
         ]
 
-        # OPTIMIZED: Vectorized median computation
         weights = [w for w, _ in weights_results]
         aggregated = []
 
         for layer_idx in range(len(weights[0])):
             layer_weights = np.stack([w[layer_idx] for w in weights])
-            # Direct vectorized median along axis 0 (across clients)
             aggregated_layer = np.median(layer_weights, axis=0)
             aggregated.append(aggregated_layer)
 
         parameters_aggregated = ndarrays_to_parameters(aggregated)
 
-        # Aggregate metrics
         metrics_aggregated = {}
         if self.fit_metrics_aggregation_fn:
             fit_metrics = [(res.num_examples, res.metrics) for _, res in results]
@@ -709,47 +722,37 @@ class MedianStrategy(FedAvg):
 
         return parameters_aggregated, metrics_aggregated
 
-
-# KrumStrategy removed due to O(n²d) complexity (too slow for large models)
-# For Byzantine-robust aggregation, use TrimmedMeanStrategy or MedianStrategy instead
-
-
 # ============================================================================
-# EXPERIMENT RUNNER (PARALLELIZED WITH RAY)
+# EXPERIMENT RUNNER (PARALLELIZED WITH JOBLIB)
 # ============================================================================
 
 class ExperimentRunner:
-    """Run complete experimental grid IN PARALLEL using Ray"""
+    """Run experiments in parallel with joblib"""
 
     def __init__(self, config: ExperimentConfig):
         self.config = config
         self.results = defaultdict(list)
 
     @staticmethod
-    @ray.remote
     def _run_single_experiment(X_train, y_train, X_test, y_test, input_dim,
                                epsilon, alpha, attack_type, aggregator, run_id,
                                base_config):
-        """Run a single experiment configuration (Ray-compatible)"""
+        """Run a single experiment configuration"""
 
-        # --- 1. Set seed for this specific run ---
+        cfg = base_config.get_config()
         ExperimentConfig.set_seed(base_config.RANDOM_SEED + run_id)
 
-        # --- 2. Partition data ---
         partitions = FederatedDataPartitioner.iid_partition(
             X_train, y_train, base_config.NUM_CLIENTS
         )
 
-        # --- 3. Determine malicious clients ---
         num_malicious = int(alpha * base_config.NUM_CLIENTS)
         malicious_ids = list(range(num_malicious))
 
-        # --- 4. Define client_fn ---
         def client_fn(cid: str):
             client_id = int(cid)
             X_client, y_client = partitions[client_id]
 
-            # Create dataloaders
             train_dataset = TensorDataset(
                 torch.FloatTensor(X_client),
                 torch.FloatTensor(y_client).view(-1, 1)
@@ -762,35 +765,40 @@ class ExperimentRunner:
             )
             test_loader = DataLoader(test_dataset, batch_size=base_config.BATCH_SIZE)
 
-            # Create model
             model = IntrusionDetectionMLP(
                 input_dim=input_dim,
                 hidden_dims=base_config.HIDDEN_DIMS,
                 dropout=base_config.DROPOUT_RATE
             ).to(base_config.DEVICE)
+            print(model)
+            print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
 
-            # Create client
             if client_id in malicious_ids and attack_type != 'none':
                 return MaliciousClient(client_id, model, train_loader, test_loader,
                                        base_config, attack_type).to_client()
             else:
                 client = BaseClient(client_id, model, train_loader, test_loader, base_config)
                 if epsilon != float('inf'):
-                    client.setup_dp(epsilon) # setup_dp calls make_private_with_epsilon
+                    client.setup_dp(epsilon)
                 return client.to_client()
 
-        # --- 5. Select strategy (FIX: Use custom classes) ---
         def weighted_avg(metrics: List[Tuple[int, Metrics]]) -> Metrics:
-            accuracies = [m['accuracy'] * n for n, m in metrics]
-            f1s = [m['f1'] * n for n, m in metrics]
-            aucs = [m['auc'] * n for n, m in metrics]
-            total = sum(n for n, _ in metrics)
-            if total == 0: return {}
-            return {
-                'accuracy': sum(accuracies) / total,
-                'f1': sum(f1s) / total,
-                'auc': sum(aucs) / total
-            }
+            # During fit, only aggregate available metrics
+            if not metrics:
+                return {}
+
+            # Check what metrics are available
+            sample_metrics = metrics[0][1]
+            aggregated = {}
+
+            for key in ['accuracy', 'f1', 'auc', 'latency', 'cpu_time']:
+                if key in sample_metrics:
+                    values = [m[key] * n for n, m in metrics]
+                    total = sum(n for n, _ in metrics)
+                    if total > 0:
+                        aggregated[key] = sum(values) / total
+
+            return aggregated
 
         strategy_params = {
             "fraction_fit": base_config.CLIENT_FRACTION,
@@ -798,50 +806,37 @@ class ExperimentRunner:
             "min_fit_clients": base_config.MIN_FIT_CLIENTS,
             "min_available_clients": base_config.MIN_AVAILABLE_CLIENTS,
             "evaluate_metrics_aggregation_fn": weighted_avg,
-            "fit_metrics_aggregation_fn": weighted_avg, # Also aggregate fit metrics
+            "fit_metrics_aggregation_fn": weighted_avg,
         }
 
         if aggregator == 'trimmed_mean':
-            strategy = TrimmedMeanStrategy(
-                **strategy_params,
-                trim_ratio=base_config.TRIM_RATIO
-            )
+            strategy = TrimmedMeanStrategy(**strategy_params, trim_ratio=base_config.TRIM_RATIO)
         elif aggregator == 'median':
-            strategy = MedianStrategy(
-                **strategy_params
-            )
-        else: # fedavg (default)
-            strategy = FedAvg(
-                **strategy_params
-            )
+            strategy = MedianStrategy(**strategy_params)
+        else:
+            strategy = FedAvg(**strategy_params)
 
-        # --- 6. Run simulation ---
         start_exp_time = time.time()
 
         history = fl.simulation.start_simulation(
             client_fn=client_fn,
             num_clients=base_config.NUM_CLIENTS,
-            config=fl.server.ServerConfig(num_rounds=base_config.NUM_ROUNDS),
+            config=fl.server.ServerConfig(num_rounds=cfg['num_rounds']),
             strategy=strategy,
             client_resources={"num_cpus": 1, "num_gpus": 0.0}
         )
 
         total_exp_time = time.time() - start_exp_time
 
-        # --- 7. Extract results ---
         final_metrics = {}
 
-        # Get client-side metrics (latency, cpu)
         if history.metrics_centralized and 'fit_metrics' in history.metrics_centralized:
-            # metrics_centralized is a dict: {round_num: (list_of_client_metrics)}
-            # We need to flatten this list of lists
             all_fit_metrics = [m for _, m_list in history.metrics_centralized['fit_metrics'] for _, m in m_list]
             all_latencies = [m['latency'] for m in all_fit_metrics if 'latency' in m]
             all_cpu_times = [m['cpu_time'] for m in all_fit_metrics if 'cpu_time' in m]
             final_metrics['avg_client_latency'] = np.mean(all_latencies) if all_latencies else 0.0
             final_metrics['avg_client_cpu'] = np.mean(all_cpu_times) if all_cpu_times else 0.0
 
-        # Get server-side evaluation metrics
         if history.metrics_distributed:
             for metric_name in ['accuracy', 'f1', 'auc']:
                 if metric_name in history.metrics_distributed:
@@ -855,9 +850,9 @@ class ExperimentRunner:
             'alpha': alpha,
             'attack_type': attack_type,
             'aggregator': aggregator,
-            'num_rounds': base_config.NUM_ROUNDS,
+            'num_rounds': cfg['num_rounds'],
             'total_time': total_exp_time,
-            'avg_round_latency': total_exp_time / base_config.NUM_ROUNDS,
+            'avg_round_latency': total_exp_time / cfg['num_rounds'],
             **final_metrics,
             'run_id': run_id
         }
@@ -866,89 +861,51 @@ class ExperimentRunner:
         return result
 
     def run_full_experiment(self, X_train, y_train, X_test, y_test, input_dim: int):
-        """Run full experimental grid in parallel"""
+        """Run experiments in parallel with joblib"""
 
-        print("\n" + "="*80)
-        print("STARTING FULL EXPERIMENTAL GRID (IN PARALLEL WITH RAY)")
-        print("="*80)
+        cfg = self.config.get_config()
 
-        # Calculate total number of experiments
-        total_configs = (len(self.config.EPSILON_VALUES) *
-                        len(self.config.MALICIOUS_FRACTIONS) *
-                        len(self.config.ATTACK_TYPES) *
-                        len(self.config.AGGREGATORS) *
-                        self.config.NUM_RUNS)
+        self.config.print_mode_info()
 
-        print(f"\n{'='*80}")
-        print(f"EXPERIMENTAL SETUP:")
-        print(f"  Epsilon values: {self.config.EPSILON_VALUES}")
-        print(f"  Malicious fractions: {self.config.MALICIOUS_FRACTIONS}")
-        print(f"  Attack types: {self.config.ATTACK_TYPES}")
-        print(f"  Aggregators: {self.config.AGGREGATORS}")
-        print(f"  Runs per config: {self.config.NUM_RUNS}")
-        print(f"  Rounds per run: {self.config.NUM_ROUNDS}")
-        print(f"  Total configurations: {total_configs}")
-        print(f"  Estimated time: 4-8 hours (parallelized)")
-        print(f"{'='*80}\n")
-
-        # Start timing
         start_time = time.time()
 
-        # --- 1. Initialize Ray ---
-        if ray.is_initialized():
-            ray.shutdown()
-        # CRITICAL FIX: Limit to 1 CPU to prevent OOM (Out-Of-Memory) errors
-        # Ray workers crash when too many run in parallel due to memory constraints
-        ray.init(num_cpus=1, log_to_driver=False, ignore_reinit_error=True)
-        print(f"\nRay initialized on 1 CPU (limited to prevent OOM errors). 🔥")
-        print(f"Note: Experiments will run sequentially instead of in parallel.\n")
+        print(f"Using joblib with {os.cpu_count()} CPUs 🚀\n")
 
-        # --- 2. Put shared data into Ray's object store ---
-        X_train_ref = ray.put(X_train)
-        y_train_ref = ray.put(y_train)
-        X_test_ref = ray.put(X_test)
-        y_test_ref = ray.put(y_test)
-
-        # --- 3. Generate all experiment task configurations ---
+        # Build task list
         tasks = []
-        for run_id in range(self.config.NUM_RUNS):
-            for epsilon in self.config.EPSILON_VALUES:
-                for alpha in self.config.MALICIOUS_FRACTIONS:
-                    for attack_type in self.config.ATTACK_TYPES:
+        for run_id in range(cfg['num_runs']):
+            for epsilon in cfg['epsilon_values']:
+                for alpha in cfg['malicious_fractions']:
+                    for attack_type in cfg['attack_types']:
                         if alpha == 0.0 and attack_type != 'none':
                             continue
                         if alpha > 0.0 and attack_type == 'none':
                             continue
 
-                        for aggregator in self.config.AGGREGATORS:
-                            tasks.append(
-                                ExperimentRunner._run_single_experiment.remote(
-                                    X_train_ref, y_train_ref, X_test_ref, y_test_ref, input_dim,
-                                    epsilon, alpha, attack_type, aggregator, run_id,
-                                    self.config
-                                )
-                            )
+                        for aggregator in cfg['aggregators']:
+                            tasks.append((X_train, y_train, X_test, y_test, input_dim,
+                                        epsilon, alpha, attack_type, aggregator, run_id, self.config))
 
-        total_experiments = len(tasks)
-        print(f"Total experiments to run: {total_experiments}")
-        print("Submitting all tasks to Ray... This will now run in parallel.\n")
+        print(f"Total experiments to run: {len(tasks)}")
+        print("Running experiments in parallel...\n")
 
-        # --- 4. Retrieve all results ---
-        all_results = ray.get(tasks)
+        # Run in parallel with joblib
+        # Replace Parallel section with:
+        all_results = []
+        for i, task in enumerate(tasks):
+            print(f"Running experiment {i+1}/{len(tasks)}...")
+            result = ExperimentRunner._run_single_experiment(*task)
+            all_results.append(result)
 
         print(f"\n{'='*80}")
         print(f"COMPLETED {len(all_results)} EXPERIMENTS")
         print(f"{'='*80}\n")
 
-        ray.shutdown()
-
-        # --- 5. Process results into your original format ---
         for result in all_results:
             if result:
                 key = f"eps{result['epsilon']}_alpha{result['alpha']}_{result['attack_type']}_{result['aggregator']}"
                 self.results[key].append(result)
 
-        # Calculate total runtime
         total_time = time.time() - start_time
         print(f"\n{'='*80}")
         print(f"RUNTIME SUMMARY:")
@@ -963,7 +920,8 @@ class ExperimentRunner:
         """Save results to JSON"""
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{self.config.RESULTS_DIR}/results_{timestamp}.json"
+            mode = self.config.EXPERIMENT_MODE
+            filename = f"{self.config.RESULTS_DIR}/results_{mode}_{timestamp}.json"
 
         results_dict = {k: v for k, v in self.results.items()}
 
@@ -972,7 +930,6 @@ class ExperimentRunner:
 
         print(f"✓ Results saved to: {filename}")
         return filename
-
 
 # ============================================================================
 # VISUALIZATION AND ANALYSIS
@@ -986,373 +943,22 @@ class ResultsAnalyzer:
         self.df = self._results_to_dataframe()
 
     def _results_to_dataframe(self) -> pd.DataFrame:
-        """Convert results dict to DataFrame"""
         rows = []
         for key, experiments in self.results.items():
             for exp in experiments:
                 rows.append(exp)
         return pd.DataFrame(rows)
 
-    def plot_rq1_privacy_utility(self, save_path: str = None):
-        """RQ1: Privacy vs Utility trade-off"""
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('RQ1: Privacy-Utility Trade-off', fontsize=16, fontweight='bold')
-
-        df_clean = self.df[(self.df['alpha'] == 0.0) &
-                           (self.df['attack_type'] == 'none') &
-                           (self.df['aggregator'] == 'fedavg')]
-
-        if df_clean.empty:
-            print("⚠️ No clean data for RQ1 plot")
-            plt.close(fig)
-            return
-
-        grouped = df_clean.groupby('epsilon').agg({
-            'final_f1': ['mean', 'std'],
-            'final_accuracy': ['mean', 'std'],
-            'final_auc': ['mean', 'std'],
-            'avg_round_latency': ['mean', 'std']
-        }).reset_index()
-
-        # F1 vs Epsilon
-        ax = axes[0, 0]
-        epsilon_vals = grouped['epsilon'].values
-        f1_means = grouped[('final_f1', 'mean')].values
-        f1_stds = grouped[('final_f1', 'std')].values
-
-        ax.errorbar(epsilon_vals, f1_means, yerr=f1_stds, marker='o', linewidth=2,
-                    markersize=8, capsize=5, label='F1 Score')
-        ax.set_xlabel('Privacy Budget (ε)', fontsize=12)
-        ax.set_ylabel('F1 Score', fontsize=12)
-        ax.set_title('F1 Score vs Privacy Budget', fontweight='bold')
-        ax.grid(True, alpha=0.3)
-        ax.set_xscale('log')
-
-        # Accuracy vs Epsilon
-        ax = axes[0, 1]
-        acc_means = grouped[('final_accuracy', 'mean')].values
-        acc_stds = grouped[('final_accuracy', 'std')].values
-
-        ax.errorbar(epsilon_vals, acc_means, yerr=acc_stds, marker='s', linewidth=2,
-                    markersize=8, capsize=5, color='green', label='Accuracy')
-        ax.set_xlabel('Privacy Budget (ε)', fontsize=12)
-        ax.set_ylabel('Accuracy', fontsize=12)
-        ax.set_title('Accuracy vs Privacy Budget', fontweight='bold')
-        ax.grid(True, alpha=0.3)
-        ax.set_xscale('log')
-
-        # AUC vs Epsilon
-        ax = axes[1, 0]
-        auc_means = grouped[('final_auc', 'mean')].values
-        auc_stds = grouped[('final_auc', 'std')].values
-
-        ax.errorbar(epsilon_vals, auc_means, yerr=auc_stds, marker='^', linewidth=2,
-                    markersize=8, capsize=5, color='red', label='AUC')
-        ax.set_xlabel('Privacy Budget (ε)', fontsize=12)
-        ax.set_ylabel('AUC', fontsize=12)
-        ax.set_title('AUC vs Privacy Budget', fontweight='bold')
-        ax.grid(True, alpha=0.3)
-        ax.set_xscale('log')
-
-        # Latency vs Epsilon
-        ax = axes[1, 1]
-        lat_means = grouped[('avg_round_latency', 'mean')].values
-        lat_stds = grouped[('avg_round_latency', 'std')].values
-
-        ax.errorbar(epsilon_vals, lat_means, yerr=lat_stds, marker='D', linewidth=2,
-                    markersize=8, capsize=5, color='purple', label='Latency')
-        ax.set_xlabel('Privacy Budget (ε)', fontsize=12)
-        ax.set_ylabel('Avg Round Latency (s)', fontsize=12)
-        ax.set_title('Latency vs Privacy Budget', fontweight='bold')
-        ax.grid(True, alpha=0.3)
-        ax.set_xscale('log')
-
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"✓ Saved: {save_path}")
-
-        plt.show()
-
-    def plot_rq2_robustness(self, save_path: str = None):
-        """RQ2: Robustness under attacks"""
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('RQ2: Robustness Under Attacks', fontsize=16, fontweight='bold')
-
-        df_fixed_eps = self.df[self.df['epsilon'] == 5.0]
-
-        if df_fixed_eps.empty:
-            print("⚠️ No data with ε=5.0 for RQ2 plot. Trying with another epsilon.")
-            if not self.df.empty:
-                any_eps = self.df['epsilon'].unique()[0]
-                df_fixed_eps = self.df[self.df['epsilon'] == any_eps]
-                print(f"Using ε={any_eps} instead.")
-            else:
-                print("No data at all.")
-                plt.close(fig)
-                return
-
-        # F1 vs Malicious Fraction (by aggregator)
-        ax = axes[0, 0]
-        for agg in self.df['aggregator'].unique():
-            df_agg = df_fixed_eps[(df_fixed_eps['aggregator'] == agg) &
-                                  (df_fixed_eps['attack_type'] == 'label_flip')]
-            if not df_agg.empty:
-                grouped = df_agg.groupby('alpha')['final_f1'].agg(['mean', 'std']).reset_index()
-                ax.errorbar(grouped['alpha'], grouped['mean'], yerr=grouped['std'],
-                           marker='o', label=agg.capitalize(), linewidth=2, markersize=8, capsize=5)
-
-        ax.set_xlabel('Malicious Client Fraction (α)', fontsize=12)
-        ax.set_ylabel('F1 Score', fontsize=12)
-        ax.set_title('F1 vs Malicious Fraction (Label Flip)', fontweight='bold')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-        # F1 vs Attack Type (α=0.2)
-        ax = axes[0, 1]
-        df_alpha02 = df_fixed_eps[(df_fixed_eps['alpha'] == 0.2) &
-                                  (df_fixed_eps['aggregator'] == 'trimmed_mean')]
-        if not df_alpha02.empty:
-            grouped = df_alpha02.groupby('attack_type')['final_f1'].agg(['mean', 'std']).reset_index()
-            # Dynamic color selection based on number of attack types
-            colors = ['green', 'orange'][:len(grouped)]
-            ax.bar(grouped['attack_type'], grouped['mean'], yerr=grouped['std'],
-                   capsize=5, alpha=0.7, color=colors)
-            ax.set_xlabel('Attack Type', fontsize=12)
-            ax.set_ylabel('F1 Score', fontsize=12)
-            ax.set_title('F1 vs Attack Type (α=0.2, Trimmed Mean)', fontweight='bold')
-            ax.grid(True, alpha=0.3, axis='y')
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
-
-        # AUC vs Malicious Fraction (by aggregator)
-        ax = axes[1, 0]
-        for agg in self.df['aggregator'].unique():
-            df_agg = df_fixed_eps[(df_fixed_eps['aggregator'] == agg) &
-                                  (df_fixed_eps['attack_type'] == 'label_flip')]
-            if not df_agg.empty:
-                grouped = df_agg.groupby('alpha')['final_auc'].agg(['mean', 'std']).reset_index()
-                ax.errorbar(grouped['alpha'], grouped['mean'], yerr=grouped['std'],
-                           marker='s', label=agg.capitalize(), linewidth=2, markersize=8, capsize=5)
-
-        ax.set_xlabel('Malicious Client Fraction (α)', fontsize=12)
-        ax.set_ylabel('AUC', fontsize=12)
-        ax.set_title('AUC vs Malicious Fraction (Label Flip)', fontweight='bold')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-        # Heatmap: Aggregator vs Attack Type
-        ax = axes[1, 1]
-        df_heatmap = df_fixed_eps[df_fixed_eps['alpha'] == 0.2]
-        pivot = df_heatmap.pivot_table(values='final_f1',
-                                       index='aggregator',
-                                       columns='attack_type',
-                                       aggfunc='mean')
-
-        if not pivot.empty:
-            sns.heatmap(pivot, annot=True, fmt='.3f', cmap='RdYlGn',
-                        vmin=0, vmax=1, ax=ax, cbar_kws={'label': 'F1 Score'})
-            ax.set_title('F1 Score: Aggregator vs Attack (α=0.2)', fontweight='bold')
-            ax.set_xlabel('Attack Type', fontsize=12)
-            ax.set_ylabel('Aggregator', fontsize=12)
-
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"✓ Saved: {save_path}")
-
-        plt.show()
-
-    def plot_rq3_operational_costs(self, save_path: str = None):
-        """RQ3: Operational costs"""
-        fig, axes = plt.subplots(1, 2, figsize=(15, 5))
-        fig.suptitle('RQ3: Operational Costs', fontsize=16, fontweight='bold')
-
-        df_clean = self.df[(self.df['alpha'] == 0.0) & (self.df['attack_type'] == 'none')]
-
-        if df_clean.empty:
-            print("⚠️ No clean data for RQ3 plot")
-            plt.close(fig)
-            return
-
-        # Latency vs Epsilon (by aggregator)
-        ax = axes[0]
-        for agg in df_clean['aggregator'].unique():
-            df_agg = df_clean[df_clean['aggregator'] == agg]
-            grouped = df_agg.groupby('epsilon')['avg_round_latency'].agg(['mean', 'std']).reset_index()
-            ax.errorbar(grouped['epsilon'], grouped['mean'], yerr=grouped['std'],
-                           marker='o', label=agg.capitalize(), linewidth=2, markersize=8, capsize=5)
-
-        ax.set_xlabel('Privacy Budget (ε)', fontsize=12)
-        ax.set_ylabel('Avg Round Latency (s)', fontsize=12)
-        ax.set_title('Latency vs Privacy Budget', fontweight='bold')
-        ax.set_xscale('log')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-        # Latency by Aggregator (bar chart)
-        ax = axes[1]
-        df_eps5 = self.df[(self.df['epsilon'] == 5.0) &
-                          (self.df['alpha'] == 0.0) &
-                          (self.df['attack_type'] == 'none')]
-
-        if df_eps5.empty:
-            print("⚠️ No data with ε=5.0 for RQ3 bar plot.")
-        else:
-            grouped = df_eps5.groupby('aggregator')['avg_round_latency'].agg(['mean', 'std']).reset_index()
-            ax.bar(grouped['aggregator'], grouped['mean'], yerr=grouped['std'],
-                   capsize=5, alpha=0.7, color=['blue', 'orange', 'green', 'red'])
-
-        ax.set_xlabel('Aggregator', fontsize=12)
-        ax.set_ylabel('Avg Round Latency (s)', fontsize=12)
-        ax.set_title('Latency by Aggregator (ε=5.0)', fontweight='bold')
-        ax.grid(True, alpha=0.3, axis='y')
-        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
-
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"✓ Saved: {save_path}")
-
-        plt.show()
-
-    def plot_rq4_pareto_frontier(self, save_path: str = None):
-        """RQ4: Multi-objective trade-off"""
-        fig = plt.figure(figsize=(18, 5))
-        gs = fig.add_gridspec(1, 3, hspace=0.3, wspace=0.3)
-
-        fig.suptitle('RQ4: Multi-Objective Trade-off Analysis', fontsize=16, fontweight='bold')
-
-        # 1. F1 vs Epsilon (colored by alpha)
-        ax = fig.add_subplot(gs[0, 0])
-        df_trimmed = self.df[(self.df['aggregator'] == 'trimmed_mean') &
-                             (self.df['attack_type'].isin(['none', 'label_flip']))]
-
-        if df_trimmed.empty:
-            print("⚠️ No data for RQ4 plot 1")
-
-        for alpha in sorted(df_trimmed['alpha'].unique()):
-            df_alpha = df_trimmed[df_trimmed['alpha'] == alpha]
-            grouped = df_alpha.groupby('epsilon')['final_f1'].mean().reset_index()
-            ax.plot(grouped['epsilon'], grouped['final_f1'],
-                    marker='o', linewidth=2, markersize=8, label=f'α={alpha}')
-
-        ax.set_xlabel('Privacy Budget (ε)', fontsize=12)
-        ax.set_ylabel('F1 Score', fontsize=12)
-        ax.set_title('F1 vs ε (by Malicious Fraction)', fontweight='bold')
-        ax.set_xscale('log')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-        # 2. F1 vs Latency (Pareto frontier)
-        ax = fig.add_subplot(gs[0, 1])
-        df_pareto = self.df[self.df['attack_type'] == 'none']
-
-        if df_pareto.empty:
-            print("⚠️ No data for RQ4 plot 2")
-        else:
-            scatter = ax.scatter(df_pareto['avg_round_latency'],
-                                 df_pareto['final_f1'],
-                                 c=np.log10(df_pareto['epsilon'].replace(np.inf, 100)),
-                                 s=100, alpha=0.6, cmap='viridis', edgecolors='black')
-            cbar = plt.colorbar(scatter, ax=ax)
-            cbar.set_label('log₁₀(ε)', fontsize=10)
-
-        ax.set_xlabel('Avg Round Latency (s)', fontsize=12)
-        ax.set_ylabel('F1 Score', fontsize=12)
-        ax.set_title('F1 vs Latency (colored by log(ε))', fontweight='bold')
-        ax.grid(True, alpha=0.3)
-
-        # 3. 3D scatter: F1 vs Epsilon vs Alpha
-        ax = fig.add_subplot(gs[0, 2], projection='3d')
-        df_3d = self.df[(self.df['aggregator'] == 'trimmed_mean') &
-                        (self.df['attack_type'] == 'label_flip')]
-
-        if df_3d.empty:
-            print("⚠️ No data for RQ4 plot 3")
-        else:
-            scatter = ax.scatter(np.log10(df_3d['epsilon'].replace(np.inf, 100)),
-                                 df_3d['alpha'],
-                                 df_3d['final_f1'],
-                                 c=df_3d['final_f1'],
-                                 s=100, alpha=0.6, cmap='RdYlGn', edgecolors='black')
-            plt.colorbar(scatter, ax=ax, shrink=0.5, label='F1 Score')
-
-        ax.set_xlabel('log₁₀(ε)', fontsize=10)
-        ax.set_ylabel('α (Malicious Fraction)', fontsize=10)
-        ax.set_zlabel('F1 Score', fontsize=10)
-        ax.set_title('3D Trade-off Space', fontweight='bold')
-
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            print(f"✓ Saved: {save_path}")
-
-        plt.show()
-
-    def generate_traffic_light_table(self, save_path: str = None):
-        """Generate operator decision table"""
-        print("\n" + "="*80)
-        print("TRAFFIC LIGHT DECISION TABLE FOR OPERATORS")
-        print("="*80 + "\n")
-
-        # Define thresholds
-        f1_green = 0.85
-        f1_yellow = 0.75
-        latency_green = 5.0
-        latency_yellow = 10.0
-
-        if self.df.empty:
-            print("No results to analyze.")
-            return
-
-        # Group by configuration
-        configs = self.df.groupby(['epsilon', 'alpha', 'aggregator', 'attack_type']).agg({
-            'final_f1': 'mean',
-            'avg_round_latency': 'mean'
-        }).reset_index()
-
-        # Assign traffic light
-        def get_status(f1, latency):
-            if f1 >= f1_green and latency <= latency_green:
-                return '✅ GREEN'
-            elif f1 >= f1_yellow and latency <= latency_yellow:
-                return '⚠️ YELLOW'
-            else:
-                return '❌ RED'
-
-        configs['status'] = configs.apply(
-            lambda row: get_status(row['final_f1'], row['avg_round_latency']), axis=1
-        )
-
-        # Print table
-        print(f"{'ε':<8} {'α':<6} {'Aggregator':<15} {'Attack':<15} {'F1':<8} {'Latency':<10} {'Status':<12}")
-        print("-" * 90)
-
-        for _, row in configs.sort_values('final_f1', ascending=False).head(20).iterrows():
-            eps_str = f"{row['epsilon']:.1f}" if row['epsilon'] != float('inf') else "∞"
-            print(f"{eps_str:<8} {row['alpha']:<6.1f} {row['aggregator']:<15} "
-                  f"{row['attack_type']:<15} {row['final_f1']:<8.3f} "
-                  f"{row['avg_round_latency']:<10.2f} {row['status']:<12}")
-
-        if save_path:
-            configs.to_csv(save_path, index=False)
-            print(f"\n✓ Table saved to: {save_path}")
-
     def generate_summary_statistics(self):
-        """Generate summary statistics for paper"""
+        """Generate summary statistics"""
         print("\n" + "="*80)
-        print("SUMMARY STATISTICS FOR PAPER")
+        print("SUMMARY STATISTICS")
         print("="*80 + "\n")
 
         if self.df.empty:
             print("No results to analyze.")
             return
 
-        # Best configuration
         best_config = self.df.loc[self.df['final_f1'].idxmax()]
         print("🏆 BEST CONFIGURATION:")
         print(f"  ε = {best_config['epsilon']}")
@@ -1363,34 +969,81 @@ class ResultsAnalyzer:
         print(f"  AUC = {best_config['final_auc']:.4f}")
         print(f"  Latency = {best_config['avg_round_latency']:.2f}s")
 
-        # Privacy-utility trade-off
-        print("\n📊 PRIVACY-UTILITY ANALYSIS (α=0, FedAvg):")
-        for eps in [1.0, 5.0, 10.0]:
-            df_eps = self.df[(self.df['epsilon'] == eps) &
-                             (self.df['alpha'] == 0.0) &
-                             (self.df['attack_type'] == 'none') &
-                             (self.df['aggregator'] == 'fedavg')]
-            if not df_eps.empty:
-                print(f"  ε={eps}: F1={df_eps['final_f1'].mean():.4f} ± {df_eps['final_f1'].std():.4f}")
+        print("\n📊 CONFIGURATION COMPARISON:")
+        summary = self.df.groupby(['epsilon', 'alpha', 'aggregator', 'attack_type']).agg({
+            'final_f1': ['mean', 'std'],
+            'final_auc': ['mean', 'std'],
+            'avg_round_latency': ['mean', 'std']
+        }).round(4)
+        print(summary.head(10))
 
-        # Robustness analysis
-        print("\n🛡️ ROBUSTNESS ANALYSIS (ε=5.0, α=0.2, Label Flip):")
-        for agg in ['fedavg', 'trimmed_mean', 'median']:
-            df_agg = self.df[(self.df['epsilon'] == 5.0) &
-                             (self.df['alpha'] == 0.2) &
-                             (self.df['attack_type'] == 'label_flip') &
-                             (self.df['aggregator'] == agg)]
-            if not df_agg.empty:
-                print(f"  {agg.capitalize()}: F1={df_agg['final_f1'].mean():.4f} ± {df_agg['final_f1'].std():.4f}")
+    def plot_pilot_results(self, save_path: str = None):
+        """Quick visualization for pilot study"""
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle(f'Pilot Study Results - {config.EXPERIMENT_MODE.upper()}',
+                     fontsize=16, fontweight='bold')
 
-        # Operational costs
-        print("\n⚡ OPERATIONAL COSTS (α=0, FedAvg):")
-        df_ops = self.df[(self.df['alpha'] == 0.0) & (self.df['attack_type'] == 'none') & (self.df['aggregator'] == 'fedavg')]
-        if not df_ops.empty:
-            print(f"  Avg latency (vs ε): {df_ops.groupby('epsilon')['avg_round_latency'].mean().to_dict()}")
-        else:
-            print("  No data for operational cost summary.")
+        # F1 vs Epsilon
+        ax = axes[0, 0]
+        df_clean = self.df[(self.df['alpha'] == 0.0) & (self.df['attack_type'] == 'none')]
+        if not df_clean.empty:
+            for agg in df_clean['aggregator'].unique():
+                df_agg = df_clean[df_clean['aggregator'] == agg]
+                grouped = df_agg.groupby('epsilon')['final_f1'].agg(['mean', 'std']).reset_index()
+                ax.errorbar(grouped['epsilon'], grouped['mean'], yerr=grouped['std'],
+                           marker='o', label=agg, linewidth=2, markersize=8, capsize=5)
+        ax.set_xlabel('Epsilon')
+        ax.set_ylabel('F1 Score')
+        ax.set_title('F1 vs Privacy Budget')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_xscale('log')
 
+        # F1 vs Malicious Fraction
+        ax = axes[0, 1]
+        df_attack = self.df[self.df['attack_type'] == 'label_flip']
+        if not df_attack.empty:
+            for agg in df_attack['aggregator'].unique():
+                df_agg = df_attack[df_attack['aggregator'] == agg]
+                grouped = df_agg.groupby('alpha')['final_f1'].agg(['mean', 'std']).reset_index()
+                ax.errorbar(grouped['alpha'], grouped['mean'], yerr=grouped['std'],
+                           marker='s', label=agg, linewidth=2, markersize=8, capsize=5)
+        ax.set_xlabel('Malicious Fraction')
+        ax.set_ylabel('F1 Score')
+        ax.set_title('Robustness Under Attack')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+        # Latency Comparison
+        ax = axes[1, 0]
+        if not self.df.empty:
+            grouped = self.df.groupby('aggregator')['avg_round_latency'].agg(['mean', 'std']).reset_index()
+            ax.bar(grouped['aggregator'], grouped['mean'], yerr=grouped['std'],
+                   capsize=5, alpha=0.7)
+        ax.set_xlabel('Aggregator')
+        ax.set_ylabel('Avg Round Latency (s)')
+        ax.set_title('Operational Costs')
+        ax.grid(True, alpha=0.3, axis='y')
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+
+        # Heatmap
+        ax = axes[1, 1]
+        pivot = self.df.pivot_table(values='final_f1',
+                                     index='aggregator',
+                                     columns='epsilon',
+                                     aggfunc='mean')
+        if not pivot.empty:
+            sns.heatmap(pivot, annot=True, fmt='.3f', cmap='RdYlGn',
+                        vmin=0, vmax=1, ax=ax)
+        ax.set_title('F1 Score Heatmap')
+
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"✓ Saved: {save_path}")
+
+        plt.show()
 
 # ============================================================================
 # MAIN EXECUTION
@@ -1400,23 +1053,25 @@ def main():
     """Main execution function"""
 
     print("\n" + "="*80)
-    print("Q1-QUALITY NWDAF FL+DP EXPERIMENT")
+    print("Q1-QUALITY NWDAF FL+DP EXPERIMENT WITH PILOT STUDY")
     print("Dataset: UNSW-NB15")
     print("="*80 + "\n")
 
     try:
-        # 1. Load and preprocess data
+        cfg = config.get_config()
+
         print("STEP 1: Loading data...")
         data_loader = UNSWDataLoader(config.DATA_PATH)
-        X, y, feature_names = data_loader.load_and_preprocess()
+        X, y, feature_names = data_loader.load_and_preprocess(
+            use_sample=cfg['use_sample'],
+            sample_fraction=cfg['sample_fraction']
+        )
 
-        # 2. Split data
         print("\nSTEP 2: Splitting data...")
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=config.TEST_SIZE, random_state=config.RANDOM_SEED, stratify=y
         )
 
-        # Normalize
         scaler = StandardScaler()
         X_train = scaler.fit_transform(X_train)
         X_test = scaler.transform(X_test)
@@ -1426,72 +1081,47 @@ def main():
 
         input_dim = X_train.shape[1]
 
-        # 3. Run experiments
         print("\nSTEP 3: Running experiments...")
         runner = ExperimentRunner(config)
         results = runner.run_full_experiment(X_train, y_train, X_test, y_test, input_dim)
 
-        # 4. Save results
         print("\nSTEP 4: Saving results...")
         results_file = runner.save_results()
 
-        # 5. Analyze and visualize
         print("\nSTEP 5: Analyzing results...")
         analyzer = ResultsAnalyzer(results)
 
-        # Generate plots
-        analyzer.plot_rq1_privacy_utility(
-            save_path=f"{config.RESULTS_DIR}/rq1_privacy_utility.png"
-        )
-
-        analyzer.plot_rq2_robustness(
-            save_path=f"{config.RESULTS_DIR}/rq2_robustness.png"
-        )
-
-        analyzer.plot_rq3_operational_costs(
-            save_path=f"{config.RESULTS_DIR}/rq3_costs.png"
-        )
-
-        analyzer.plot_rq4_pareto_frontier(
-            save_path=f"{config.RESULTS_DIR}/rq4_pareto.png"
-        )
-
-        # Generate tables
-        analyzer.generate_traffic_light_table(
-            save_path=f"{config.RESULTS_DIR}/traffic_light_table.csv"
+        analyzer.plot_pilot_results(
+            save_path=f"{config.RESULTS_DIR}/{config.EXPERIMENT_MODE}_results.png"
         )
 
         analyzer.generate_summary_statistics()
 
-        print("\n" + "="*88)
+        print("\n" + "="*80)
         print("✅ EXPERIMENT COMPLETE!")
-        print("="*88)
+        print("="*80)
         print(f"\nResults saved in: {config.RESULTS_DIR}/")
-        print("Files generated:")
-        print(f"  - {os.path.basename(results_file)}")
-        print(f"  - rq1_privacy_utility.png")
-        print(f"  - rq2_robustness.png")
-        print(f"  - rq3_costs.png")
-        print(f"  - rq4_pareto.png")
-        print(f"  - traffic_light_table.csv")
-        print("\n📊 Use these results for your Q1 paper!")
+        print(f"Mode: {cfg['name']}")
+        print(f"\nNext steps:")
+        if config.EXPERIMENT_MODE == 'pilot':
+            print("  1. Review results to identify best configs")
+            print("  2. Change EXPERIMENT_MODE to 'focused' for deeper analysis")
+            print("  3. Run 'focused' experiments on promising configurations")
+        elif config.EXPERIMENT_MODE == 'focused':
+            print("  1. Validate findings from focused study")
+            print("  2. Change EXPERIMENT_MODE to 'full' for final paper")
+            print("  3. Run 'full' experiments for comprehensive results")
+        else:
+            print("  📊 Use these results for your Q1 paper!")
 
     except FileNotFoundError as e:
         print(f"\n❌ CRITICAL ERROR: Could not find data file.")
         print(f"  Details: {e}")
-        print(f"  Please check your DATA_PATH in the ExperimentConfig class.")
+        print(f"  Please update DATA_PATH in ExperimentConfig class.")
     except Exception as e:
         print(f"\n❌ AN UNEXPECTED ERROR OCCURRED: {e}")
         import traceback
         traceback.print_exc()
 
-# ============================================================================
-# RUN
-# ============================================================================
-
 if __name__ == "__main__":
-    # In a Colab notebook, you will call main() in a separate cell.
-    # If running as a .py file, this will execute.
-
-    # We call main() directly for running in a script
     main()
