@@ -321,7 +321,7 @@ def analyze_phase_results(results_dir: Path, metric_name: str = 'final_f1') -> D
 
     analysis_file = results_dir / 'analysis' / f'statistical_analysis_{metric_name}.json'
     with open(analysis_file, 'w') as f:
-        json.dump(analysis, f, indent=2)
+        json.dump(analysis, f, indent=2, default=str)  # Convert non-serializable types to string
 
     print(f"\n✓ Analysis saved to: {analysis_file}")
 
