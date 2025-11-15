@@ -215,30 +215,54 @@ class BaseClient(fl.client.NumPyClient):
         )
 
         metrics['loss'] = total_loss / len(self.testloader) if len(self.testloader) > 0 else 0
+        metrics['num_examples'] = len(all_labels)
 
-        return metrics['loss'], len(self.testloader.dataset), metrics
+        return float(metrics['loss']), len(self.testloader.dataset), metrics
 
 
 class MaliciousClient(BaseClient):
-    """Client that performs label flipping attack"""
+    """Client that performs label flip attack"""
 
     def __init__(self, cid: int, model: nn.Module, trainloader: DataLoader,
-                 testloader: DataLoader, config: ExperimentConfig, attack_type: str = 'label_flip'):
+                 testloader: DataLoader, config: ExperimentConfig, attack_type: str):
         super().__init__(cid, model, trainloader, testloader, config)
         self.attack_type = attack_type
 
-        if attack_type == 'label_flip':
-            # Flip labels in training data
-            flipped_data = []
-            for data, labels in trainloader:
-                flipped_labels = 1 - labels
-                flipped_data.append((data, flipped_labels))
+    def fit(self, parameters: NDArrays, config: Dict) -> Tuple[NDArrays, int, Dict]:
+        if self.attack_type == 'label_flip':
+            return self._label_flip_attack(parameters, config)
+        else:
+            return super().fit(parameters, config)
 
-            self.trainloader = DataLoader(
-                [(d, l) for d, l in flipped_data],
-                batch_size=trainloader.batch_size,
-                shuffle=True
-            )
+    def _label_flip_attack(self, parameters: NDArrays, config: Dict):
+        self.set_parameters(parameters)
+        self.model.train()
+
+        start_time = time.time()
+
+        for epoch in range(self.config.LOCAL_EPOCHS):
+            for data, target in self.trainloader:
+                flipped_target = 1 - target
+                data = data.to(self.config.DEVICE)
+                flipped_target = flipped_target.to(self.config.DEVICE)
+
+                self.optimizer.zero_grad()
+                output = self.model(data)
+                loss = self.criterion(output, flipped_target)
+                loss.backward()
+                self.optimizer.step()
+
+        latency = time.time() - start_time
+        updated_params = self.get_parameters(config={})
+
+        metrics = {
+            'client_id': self.cid,
+            'latency': latency,
+            'attack_type': 'label_flip',
+            'num_examples': len(self.trainloader.dataset),
+        }
+
+        return updated_params, len(self.trainloader.dataset), metrics
 
 
 # ============================================================================
@@ -252,25 +276,30 @@ class TrimmedMeanStrategy(FedAvg):
         super().__init__(**kwargs)
         self.trim_ratio = trim_ratio
 
-    def aggregate_fit(self, server_round: int, results, failures):
+    def aggregate_fit(self, server_round, results, failures):
         if not results:
             return None, {}
 
-        # Convert to numpy arrays
-        weights_list = [parameters_to_ndarrays(fit_res.parameters) for _, fit_res in results]
+        weights_results = [
+            (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples)
+            for _, fit_res in results
+        ]
 
-        # Trim and average each layer
+        weights = [w for w, _ in weights_results]
         aggregated = []
-        for layer_weights in zip(*weights_list):
-            layer_weights = np.array(layer_weights)
-            trim_count = int(len(layer_weights) * self.trim_ratio)
+        trim_count = int(self.trim_ratio * len(weights))
 
-            if trim_count > 0:
+        for layer_idx in range(len(weights[0])):
+            layer_weights = np.stack([w[layer_idx] for w in weights])
+
+            if trim_count > 0 and trim_count < len(weights) // 2:
                 sorted_weights = np.sort(layer_weights, axis=0)
                 trimmed = sorted_weights[trim_count:-trim_count]
-                aggregated.append(np.mean(trimmed, axis=0))
+                aggregated_layer = np.mean(trimmed, axis=0)
             else:
-                aggregated.append(np.mean(layer_weights, axis=0))
+                aggregated_layer = np.mean(layer_weights, axis=0)
+
+            aggregated.append(aggregated_layer)
 
         parameters_aggregated = ndarrays_to_parameters(aggregated)
 
@@ -285,18 +314,22 @@ class TrimmedMeanStrategy(FedAvg):
 class MedianStrategy(FedAvg):
     """Coordinate-wise median aggregation"""
 
-    def aggregate_fit(self, server_round: int, results, failures):
+    def aggregate_fit(self, server_round, results, failures):
         if not results:
             return None, {}
 
-        # Convert to numpy arrays
-        weights_list = [parameters_to_ndarrays(fit_res.parameters) for _, fit_res in results]
+        weights_results = [
+            (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples)
+            for _, fit_res in results
+        ]
 
-        # Median for each layer
+        weights = [w for w, _ in weights_results]
         aggregated = []
-        for layer_weights in zip(*weights_list):
-            layer_weights = np.array(layer_weights)
-            aggregated.append(np.median(layer_weights, axis=0))
+
+        for layer_idx in range(len(weights[0])):
+            layer_weights = np.stack([w[layer_idx] for w in weights])
+            aggregated_layer = np.median(layer_weights, axis=0)
+            aggregated.append(aggregated_layer)
 
         parameters_aggregated = ndarrays_to_parameters(aggregated)
 
@@ -474,12 +507,6 @@ def run_single_experiment(
 
     # Extract metrics from history
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Processing results...")
-    
-    # DEBUG: Check what Flower actually evaluated
-    if 'f1' in history.metrics_distributed:
-        print(f"DEBUG: Flower evaluated {len(history.metrics_distributed['f1'])} rounds")
-        print(f"DEBUG: Evaluated rounds: {[r for r, _ in history.metrics_distributed['f1']]}")
-        print(f"DEBUG: Sample F1 values: {[(r, v) for r, v in history.metrics_distributed['f1'][:5]]}")
 
     if history.metrics_distributed:
         for round_num in range(1, num_rounds + 1):
@@ -494,12 +521,6 @@ def run_single_experiment(
                     values = history.metrics_distributed[metric_name]
                     if len(values) >= round_num:
                         round_metrics[metric_name] = values[round_num - 1][1]
-                    elif len(values) > 0:
-                        round_metrics[metric_name] = values[-1][1]
-                    else:
-                        round_metrics[metric_name] = 0.0
-                else:
-                    round_metrics[metric_name] = 0.0
 
             tracker.log_round(round_num, round_metrics)
 
