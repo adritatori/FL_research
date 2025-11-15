@@ -150,6 +150,7 @@ class BaseClient(fl.client.NumPyClient):
         total_loss = 0
         num_batches = 0
         epoch_losses = []
+        total_grad_norm = 0
 
         for epoch in range(self.config.LOCAL_EPOCHS):
             epoch_loss = 0
@@ -169,8 +170,13 @@ class BaseClient(fl.client.NumPyClient):
 
                 loss.backward()
 
-                # Gentle gradient clipping for stability
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+                # Calculate gradient norm for debugging
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=float('inf'))
+                total_grad_norm += grad_norm.item()
+
+                # Only clip gradients if NOT using DP (Opacus handles clipping internally)
+                if self.privacy_engine is None:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
 
                 self.optimizer.step()
 
@@ -185,6 +191,7 @@ class BaseClient(fl.client.NumPyClient):
                 epoch_losses.append(avg_epoch_loss)
 
         avg_loss = total_loss / num_batches if num_batches > 0 else 0
+        avg_grad_norm = total_grad_norm / num_batches if num_batches > 0 else 0
 
         end_time = time.time()
         end_cpu = psutil.Process().cpu_times()
@@ -198,6 +205,7 @@ class BaseClient(fl.client.NumPyClient):
             'cpu_time': end_cpu.user - start_cpu.user,
             'bandwidth_bytes': param_size,
             'avg_loss': avg_loss,
+            'avg_grad_norm': avg_grad_norm,
             'num_examples': len(self.trainloader.dataset),
             'learning_rate': self.optimizer.param_groups[0]['lr'],
         }
