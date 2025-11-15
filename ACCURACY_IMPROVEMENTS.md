@@ -151,10 +151,28 @@ After V1 still showed oscillation, diagnosed as:
 - Removed scheduler (consistency)
 - GroupNorm (differential privacy compatibility)
 
-**V2.1 (Current) - DP Compatibility Fix**:
+**V2.1 - DP Compatibility Fix**:
 - Kept GroupNorm (not BatchNorm) for differential privacy support
 - BatchNorm was causing errors in Phase 2 (privacy experiments)
 - GroupNorm works for both baseline and privacy phases
+
+**V2.2 - DP Training Stability Fix**:
+- Increased MAX_GRAD_NORM from 1.0 to 10.0 (CRITICAL for DP)
+- Fixed double gradient clipping (only clip when not using DP)
+- DP adds noise, so needs larger gradient norms to preserve signal
+- Phase 1 (no DP): Unchanged, still works great
+- Phase 2 (with DP): Partial fix, but epsilon=0.5 still oscillating
+- See DP_FIXES.md for detailed explanation
+
+**V2.3 (Current) - Adaptive Learning Rate for DP**:
+- Root cause: epsilon=0.5 noise SO LARGE that LR=0.002 too weak
+- Solution: Adaptive LR based on privacy level
+  - epsilon ≤ 1.0: LR = 0.05 (25x increase)
+  - epsilon ≤ 5.0: LR = 0.01 (5x increase)
+  - epsilon > 5.0: LR = 0.005 (2.5x increase)
+  - epsilon = ∞: LR = 0.002 (baseline, unchanged)
+- Stricter privacy needs higher LR to overcome massive noise
+- See ADAPTIVE_LR_DP.md for detailed explanation
 
 ### Version 1 - INITIAL FIX (Unsuccessful)
 - Increased LR to 0.01 (caused oscillation)
