@@ -349,7 +349,8 @@ def create_summary_table(results_dir: Path, metrics: List[str] = None) -> pd.Dat
 
         for metric in metrics:
             values = [run.get(metric, np.nan) for run in runs]
-            values = [v for v in values if not (isinstance(v, float) and np.isnan(v))]
+            # Filter out None and NaN values
+            values = [v for v in values if v is not None and not (isinstance(v, float) and np.isnan(v))]
 
             if values:
                 stats_dict = compute_statistics(values)
