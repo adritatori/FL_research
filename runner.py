@@ -521,6 +521,8 @@ def run_single_experiment(
                     values = history.metrics_distributed[metric_name]
                     if len(values) >= round_num:
                         round_metrics[metric_name] = values[round_num - 1][1]
+                    elif len(values) > 0:
+                        round_metrics[metric_name] = values[-1][1]
 
             tracker.log_round(round_num, round_metrics)
 
