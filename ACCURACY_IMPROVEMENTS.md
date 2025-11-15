@@ -57,12 +57,12 @@ HIDDEN_DIMS = [64, 32]  # Reduced from [128, 64, 32]
 ```
 **Impact**: Simpler model is easier to train and stabilize in federated setting
 
-### 4. BatchNorm Instead of GroupNorm
+### 4. GroupNorm for Differential Privacy Compatibility
 **File**: `runner.py` - `IntrusionDetectionMLP`
 ```python
-nn.BatchNorm1d(hidden_dim)  # Instead of GroupNorm
+nn.GroupNorm(num_groups, hidden_dim)  # GroupNorm for DP compatibility
 ```
-**Impact**: BatchNorm better suited for federated learning, standard approach
+**Impact**: GroupNorm is privacy-safe (required for differential privacy phases), works for both DP and non-DP training
 
 ### 5. Larger Batch Size
 **File**: `config.py`
@@ -144,12 +144,17 @@ After V1 still showed oscillation, diagnosed as:
 - Learning rate still too high
 
 **V2 Changes**:
-- SGD instead of Adam
-- Simpler architecture [64, 32]
-- LR = 0.002 (conservative)
-- Larger batch size (256)
-- Removed scheduler
-- BatchNorm instead of GroupNorm
+- SGD instead of Adam (stability)
+- Simpler architecture [64, 32] (easier to train)
+- LR = 0.002 (conservative, prevents oscillation)
+- Larger batch size (256) (reduces gradient variance)
+- Removed scheduler (consistency)
+- GroupNorm (differential privacy compatibility)
+
+**V2.1 (Current) - DP Compatibility Fix**:
+- Kept GroupNorm (not BatchNorm) for differential privacy support
+- BatchNorm was causing errors in Phase 2 (privacy experiments)
+- GroupNorm works for both baseline and privacy phases
 
 ### Version 1 - INITIAL FIX (Unsuccessful)
 - Increased LR to 0.01 (caused oscillation)
