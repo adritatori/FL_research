@@ -169,8 +169,9 @@ class BaseClient(fl.client.NumPyClient):
 
                 loss.backward()
 
-                # Gentle gradient clipping for stability
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+                # Gradient clipping for stability (only if not using DP - Opacus handles it)
+                if self.privacy_engine is None:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
 
                 self.optimizer.step()
 
