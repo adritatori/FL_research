@@ -14,36 +14,41 @@ from runner import IntrusionDetectionMLP, BaseClient
 from config import ExperimentConfig
 from main import UNSWDataLoader
 
-print("="*80)
-print("DIAGNOSTIC: Model Training Failure Investigation")
-print("="*80)
 
-# Load config
+print("=" * 80)
+print("DIAGNOSTIC: Model Training Failure Investigation")
+print("=" * 80)
+
+# ---------------------------------------------------------------------------
+# 1. Load config and data
+# ---------------------------------------------------------------------------
+
 config = ExperimentConfig()
 config.set_seed(42)
 
-# Load a small sample of data
 print("\n1. Loading data...")
 data_loader = UNSWDataLoader(config.DATA_PATH)
 X, y, _ = data_loader.load_and_preprocess(use_sample=True, sample_fraction=0.01)
 
-# Split and scale
+# Split
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y
 )
 
+# Scale
 scaler = StandardScaler()
 X_train = scaler.fit_transform(X_train)
 X_test = scaler.transform(X_test)
 
 print(f"   Train shape: {X_train.shape}, Test shape: {X_test.shape}")
-print(f"   Train labels - 0s: {np.sum(y_train==0)}, 1s: {np.sum(y_train==1)}")
+print(f"   Train labels - 0s: {np.sum(y_train == 0)}, 1s: {np.sum(y_train == 1)}")
 
-# Create simple datasets (not partitioned)
+# Build datasets
 train_dataset = TensorDataset(
     torch.FloatTensor(X_train),
     torch.FloatTensor(y_train).view(-1, 1)
 )
+
 test_dataset = TensorDataset(
     torch.FloatTensor(X_test),
     torch.FloatTensor(y_test).view(-1, 1)
@@ -55,8 +60,12 @@ testloader = DataLoader(test_dataset, batch_size=128)
 print(f"   Trainloader batches: {len(trainloader)}")
 print(f"   Testloader batches: {len(testloader)}")
 
-# Create model
+# ---------------------------------------------------------------------------
+# 2. Model creation
+# ---------------------------------------------------------------------------
+
 print("\n2. Creating model...")
+
 model = IntrusionDetectionMLP(
     input_dim=X_train.shape[1],
     hidden_dims=[128, 64, 32],
@@ -66,29 +75,41 @@ model = IntrusionDetectionMLP(
 print(f"   Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 print(f"   Model device: {next(model.parameters()).device}")
 
-# Setup loss and optimizer
+# Loss + optimizer
 num_class_0 = np.sum(y_train == 0)
 num_class_1 = np.sum(y_train == 1)
 pos_weight = torch.tensor([num_class_0 / num_class_1]).to(config.DEVICE)
+
 print(f"   Pos weight: {pos_weight.item():.4f}")
 
 criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-# Test initial predictions
+# ---------------------------------------------------------------------------
+# 3. Initial model predictions
+# ---------------------------------------------------------------------------
+
 print("\n3. Testing initial model predictions...")
 model.eval()
+
 with torch.no_grad():
     for data, target in testloader:
         data = data.to(config.DEVICE)
         logits = model(data)
         probs = torch.sigmoid(logits)
 
-        print(f"   Logits - min: {logits.min().item():.4f}, max: {logits.max().item():.4f}, mean: {logits.mean().item():.4f}")
-        print(f"   Probs - min: {probs.min().item():.4f}, max: {probs.max().item():.4f}, mean: {probs.mean().item():.4f}")
+        print(f"   Logits - min: {logits.min().item():.4f}, "
+              f"max: {logits.max().item():.4f}, mean: {logits.mean().item():.4f}")
+
+        print(f"   Probs  - min: {probs.min().item():.4f}, "
+              f"max: {probs.max().item():.4f}, mean: {probs.mean().item():.4f}")
+
         break
 
-# Train for a few epochs
+# ---------------------------------------------------------------------------
+# 4. Training loop
+# ---------------------------------------------------------------------------
+
 print("\n4. Training for 10 epochs...")
 model.train()
 
@@ -96,22 +117,21 @@ for epoch in range(10):
     total_loss = 0
     num_batches = 0
 
-    for data, target in trainloader:
+    for batch_idx, (data, target) in enumerate(trainloader):
         data, target = data.to(config.DEVICE), target.to(config.DEVICE)
 
         optimizer.zero_grad()
         output = model(data)
         loss = criterion(output, target)
 
-        # Check for NaN
         if torch.isnan(loss):
-            print(f"   ERROR: NaN loss detected!")
+            print("   ERROR: NaN loss detected!")
             break
 
         loss.backward()
 
-        # Check gradients
-        if epoch == 0 and num_batches == 0:
+        # Gradient norm check
+        if epoch == 0 and batch_idx == 0:
             total_grad_norm = 0
             for p in model.parameters():
                 if p.grad is not None:
@@ -136,6 +156,7 @@ for epoch in range(10):
             data, target = data.to(config.DEVICE), target.to(config.DEVICE)
             logits = model(data)
             preds = (torch.sigmoid(logits) > 0.5).float()
+
             correct += (preds == target).sum().item()
             total += target.size(0)
 
@@ -144,9 +165,13 @@ for epoch in range(10):
 
     model.train()
 
-# Final evaluation
+# ---------------------------------------------------------------------------
+# 5. Final evaluation
+# ---------------------------------------------------------------------------
+
 print("\n5. Final model predictions...")
 model.eval()
+
 all_preds = []
 all_probs = []
 all_labels = []
@@ -173,9 +198,11 @@ auc = roc_auc_score(all_labels, all_probs)
 
 print(f"   Final F1: {f1:.4f}")
 print(f"   Final AUC-ROC: {auc:.4f}")
-print(f"   Prediction distribution: 0s={np.sum(all_preds==0)}, 1s={np.sum(all_preds==1)}")
-print(f"   Label distribution: 0s={np.sum(all_labels==0)}, 1s={np.sum(all_labels==1)}")
+print(f"   Prediction distribution: 0s={np.sum(all_preds == 0)}, "
+      f"1s={np.sum(all_preds == 1)}")
+print(f"   Label distribution: 0s={np.sum(all_labels == 0)}, "
+      f"1s={np.sum(all_labels == 1)}")
 
-print("\n" + "="*80)
+print("\n" + "=" * 80)
 print("DIAGNOSIS COMPLETE")
-print("="*80)
+print("=" * 80)
