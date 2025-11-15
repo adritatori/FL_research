@@ -36,7 +36,7 @@ class ExperimentConfig:
     # CORE PARAMETERS (Fixed across all experiments)
     # ========================================================================
     RANDOM_SEED = 42
-    NUM_RUNS = 5  # Number of independent runs per config
+    NUM_RUNS = 3  # Number of independent runs per config (reduced for faster execution)
 
     # Dataset
     TEST_SIZE = 0.2
@@ -47,7 +47,7 @@ class ExperimentConfig:
     CLIENT_FRACTION = 1.0
     MIN_FIT_CLIENTS = 8
     MIN_AVAILABLE_CLIENTS = 8
-    NUM_ROUNDS = 100  # Max rounds (can early stop)
+    NUM_ROUNDS = 50  # Max rounds (can early stop, reduced from 100)
 
     # Training
     LOCAL_EPOCHS = 5
@@ -104,7 +104,7 @@ class ExperimentConfig:
                         'attack_ratio': 0.0,
                     },
                 ],
-                'num_rounds': 100,
+                'num_rounds': 50,
                 'use_sample': False,
                 'sample_fraction': 1.0,
             }
@@ -115,9 +115,9 @@ class ExperimentConfig:
                 'description': 'Analyze privacy-utility tradeoff across epsilon values',
                 'configs': [
                     {'epsilon': eps, 'aggregator': 'fedavg', 'attack_type': 'none', 'attack_ratio': 0.0}
-                    for eps in [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, float('inf')]
+                    for eps in [0.5, 1.0, 5.0, float('inf')]
                 ],
-                'num_rounds': 100,
+                'num_rounds': 50,
                 'use_sample': False,
                 'sample_fraction': 1.0,
             }
@@ -137,7 +137,7 @@ class ExperimentConfig:
                     for attack in ['none', 'label_flip']
                     for ratio in ([0.0] if attack == 'none' else [0.1, 0.2, 0.3])
                 ],
-                'num_rounds': 100,
+                'num_rounds': 50,
                 'use_sample': False,
                 'sample_fraction': 1.0,
             }
@@ -157,7 +157,7 @@ class ExperimentConfig:
                     for agg in ['fedavg', 'trimmed_mean', 'median']
                     for ratio in [0.1, 0.2, 0.3]
                 ],
-                'num_rounds': 100,
+                'num_rounds': 50,
                 'use_sample': False,
                 'sample_fraction': 1.0,
             }
@@ -178,7 +178,7 @@ class ExperimentConfig:
                     for attack in ['none', 'label_flip']
                     for ratio in ([0.0] if attack == 'none' else [0.1, 0.2, 0.3])
                 ],
-                'num_rounds': 100,
+                'num_rounds': 50,
                 'use_sample': False,
                 'sample_fraction': 1.0,
             }
