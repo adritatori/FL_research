@@ -523,6 +523,10 @@ def run_single_experiment(
                         round_metrics[metric_name] = values[round_num - 1][1]
                     elif len(values) > 0:
                         round_metrics[metric_name] = values[-1][1]
+                    else:
+                        round_metrics[metric_name] = 0.0
+                else:
+                    round_metrics[metric_name] = 0.0
 
             tracker.log_round(round_num, round_metrics)
 
