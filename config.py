@@ -60,7 +60,7 @@ class ExperimentConfig:
 
     # Differential Privacy
     TARGET_DELTA = 1e-5
-    MAX_GRAD_NORM = 1.0
+    MAX_GRAD_NORM = 10.0  # Increased for DP stability (was 1.0, too strict)
 
     # Robust Aggregation
     TRIM_RATIO = 0.1

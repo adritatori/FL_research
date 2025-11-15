@@ -104,6 +104,7 @@ class BaseClient(fl.client.NumPyClient):
 
         self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         # Use SGD with momentum for stable federated learning
+        # Learning rate will be adjusted in setup_dp() if DP is enabled
         self.optimizer = optim.SGD(
             model.parameters(),
             lr=config.LEARNING_RATE,
@@ -113,9 +114,31 @@ class BaseClient(fl.client.NumPyClient):
         self.privacy_engine = None
 
     def setup_dp(self, epsilon: float, num_rounds: int):
-        """Setup differential privacy"""
+        """Setup differential privacy with adaptive learning rate"""
         if epsilon == float('inf'):
             return
+
+        # Adjust learning rate based on epsilon (stricter privacy needs higher LR)
+        # This compensates for the massive noise added by DP
+        if epsilon <= 1.0:
+            # Very strict privacy - need much higher LR to overcome noise
+            adaptive_lr = 0.05  # 25x increase from 0.002
+            print(f"  [DP] Client {self.cid}: Using adaptive LR={adaptive_lr} for epsilon={epsilon}")
+        elif epsilon <= 5.0:
+            # Moderate privacy - moderately higher LR
+            adaptive_lr = 0.01  # 5x increase
+            print(f"  [DP] Client {self.cid}: Using adaptive LR={adaptive_lr} for epsilon={epsilon}")
+        else:
+            # Relaxed privacy - slight increase
+            adaptive_lr = 0.005  # 2.5x increase
+
+        # Recreate optimizer with adaptive learning rate
+        self.optimizer = optim.SGD(
+            self.model.parameters(),
+            lr=adaptive_lr,
+            momentum=0.9,
+            weight_decay=1e-4
+        )
 
         self.privacy_engine = PrivacyEngine()
 
@@ -170,11 +193,7 @@ class BaseClient(fl.client.NumPyClient):
 
                 loss.backward()
 
-                # Calculate gradient norm for debugging
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=float('inf'))
-                total_grad_norm += grad_norm.item()
-
-                # Only clip gradients if NOT using DP (Opacus handles clipping internally)
+                # Gradient clipping for stability (only if not using DP - Opacus handles it)
                 if self.privacy_engine is None:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
 
