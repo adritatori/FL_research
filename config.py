@@ -50,13 +50,13 @@ class ExperimentConfig:
     NUM_ROUNDS = 50  # Max rounds (can early stop, reduced from 100)
 
     # Training
-    LOCAL_EPOCHS = 5
+    LOCAL_EPOCHS = 10  # Increased from 5 - more training per round
     BATCH_SIZE = 128
-    LEARNING_RATE = 0.001
+    LEARNING_RATE = 0.01  # Increased from 0.001 - CRITICAL FIX for learning
 
     # Model
     HIDDEN_DIMS = [128, 64, 32]
-    DROPOUT_RATE = 0.3
+    DROPOUT_RATE = 0.2  # Reduced from 0.3 - less aggressive regularization
 
     # Differential Privacy
     TARGET_DELTA = 1e-5

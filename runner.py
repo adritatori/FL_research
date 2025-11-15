@@ -35,8 +35,8 @@ from metrics import MetricsTracker, compute_comprehensive_metrics, aggregate_cli
 
 class IntrusionDetectionMLP(nn.Module):
     """Neural network for binary intrusion detection"""
-    
-    def __init__(self, input_dim: int, hidden_dims: List[int] = [128, 64, 32], dropout: float = 0.3):
+
+    def __init__(self, input_dim: int, hidden_dims: List[int] = [128, 64, 32], dropout: float = 0.2):
         super().__init__()
         layers = []
         prev_dim = input_dim
@@ -54,18 +54,26 @@ class IntrusionDetectionMLP(nn.Module):
                 num_groups = 4
             else:
                 num_groups = 1
-            
+
+            linear = nn.Linear(prev_dim, hidden_dim)
+            # Use Kaiming (He) initialization for ReLU activations
+            nn.init.kaiming_normal_(linear.weight, mode='fan_in', nonlinearity='relu')
+            nn.init.constant_(linear.bias, 0.01)  # Small positive bias
+
             layers.extend([
-                nn.Linear(prev_dim, hidden_dim),
+                linear,
                 nn.GroupNorm(num_groups, hidden_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout)
             ])
             prev_dim = hidden_dim
-        
-        # Output layer
-        layers.append(nn.Linear(prev_dim, 1))
-        
+
+        # Output layer with Xavier initialization
+        output_layer = nn.Linear(prev_dim, 1)
+        nn.init.xavier_normal_(output_layer.weight)
+        nn.init.constant_(output_layer.bias, 0.0)
+        layers.append(output_layer)
+
         self.network = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -102,7 +110,17 @@ class BaseClient(fl.client.NumPyClient):
             pos_weight = torch.tensor([1.0]).to(config.DEVICE)
 
         self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        self.optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
+        # Use Adam with higher learning rate and weight decay for better convergence
+        self.optimizer = optim.Adam(
+            model.parameters(),
+            lr=config.LEARNING_RATE,
+            betas=(0.9, 0.999),
+            weight_decay=1e-5  # Add L2 regularization
+        )
+        # Add learning rate scheduler for adaptive learning
+        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', factor=0.5, patience=3, verbose=False
+        )
         self.privacy_engine = None
 
     def setup_dp(self, epsilon: float, num_rounds: int):
@@ -142,9 +160,12 @@ class BaseClient(fl.client.NumPyClient):
 
         total_loss = 0
         num_batches = 0
-        first_batch_done = False
+        epoch_losses = []
 
         for epoch in range(self.config.LOCAL_EPOCHS):
+            epoch_loss = 0
+            epoch_batches = 0
+
             for data, target in self.trainloader:
                 data, target = data.to(self.config.DEVICE), target.to(self.config.DEVICE)
 
@@ -152,19 +173,31 @@ class BaseClient(fl.client.NumPyClient):
                 output = self.model(data)
                 loss = self.criterion(output, target)
 
+                # Check for NaN loss
+                if torch.isnan(loss):
+                    print(f"  [ERROR] Client {self.cid}: NaN loss detected!")
+                    continue
+
                 loss.backward()
 
-                # Diagnostic: Check gradients on first batch
-                if not first_batch_done:
-                    grad_norm = sum(p.grad.norm().item() ** 2 for p in self.model.parameters() if p.grad is not None) ** 0.5
-                    if grad_norm < 1e-7:
-                        print(f"  [WARNING] Client {self.cid}: Vanishing gradients (norm={grad_norm:.2e})")
-                    first_batch_done = True
+                # Gradient clipping to prevent exploding gradients
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
 
                 self.optimizer.step()
 
+                epoch_loss += loss.item()
+                epoch_batches += 1
                 total_loss += loss.item()
                 num_batches += 1
+
+            # Calculate epoch average loss
+            if epoch_batches > 0:
+                avg_epoch_loss = epoch_loss / epoch_batches
+                epoch_losses.append(avg_epoch_loss)
+
+                # Update learning rate based on loss (only if not using DP)
+                if self.privacy_engine is None:
+                    self.scheduler.step(avg_epoch_loss)
 
         avg_loss = total_loss / num_batches if num_batches > 0 else 0
 
@@ -181,6 +214,7 @@ class BaseClient(fl.client.NumPyClient):
             'bandwidth_bytes': param_size,
             'avg_loss': avg_loss,
             'num_examples': len(self.trainloader.dataset),
+            'learning_rate': self.optimizer.param_groups[0]['lr'],
         }
 
         if self.privacy_engine:

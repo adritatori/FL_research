@@ -69,7 +69,7 @@ print("\n2. Creating model...")
 model = IntrusionDetectionMLP(
     input_dim=X_train.shape[1],
     hidden_dims=[128, 64, 32],
-    dropout=0.3
+    dropout=0.2
 ).to(config.DEVICE)
 
 print(f"   Model parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -83,7 +83,10 @@ pos_weight = torch.tensor([num_class_0 / num_class_1]).to(config.DEVICE)
 print(f"   Pos weight: {pos_weight.item():.4f}")
 
 criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+optimizer = optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-5)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', factor=0.5, patience=3, verbose=True
+)
 
 # ---------------------------------------------------------------------------
 # 3. Initial model predictions
@@ -130,6 +133,9 @@ for epoch in range(10):
 
         loss.backward()
 
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
         # Gradient norm check
         if epoch == 0 and batch_idx == 0:
             total_grad_norm = 0
@@ -146,6 +152,9 @@ for epoch in range(10):
 
     avg_loss = total_loss / num_batches
 
+    # Update learning rate
+    scheduler.step(avg_loss)
+
     # Evaluate
     model.eval()
     correct = 0
@@ -161,7 +170,8 @@ for epoch in range(10):
             total += target.size(0)
 
     accuracy = correct / total
-    print(f"   Epoch {epoch+1}: Loss={avg_loss:.4f}, Accuracy={accuracy:.4f}")
+    current_lr = optimizer.param_groups[0]['lr']
+    print(f"   Epoch {epoch+1}: Loss={avg_loss:.4f}, Accuracy={accuracy:.4f}, LR={current_lr:.6f}")
 
     model.train()
 
