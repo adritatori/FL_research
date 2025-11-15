@@ -69,7 +69,7 @@ print("\n2. Creating model...")
 model = IntrusionDetectionMLP(
     input_dim=X_train.shape[1],
     hidden_dims=[64, 32],
-    dropout=0.1
+    dropout=0.1  # Uses GroupNorm internally for DP compatibility
 ).to(config.DEVICE)
 
 print(f"   Model parameters: {sum(p.numel() for p in model.parameters()):,}")
