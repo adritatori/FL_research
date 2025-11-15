@@ -142,6 +142,7 @@ class BaseClient(fl.client.NumPyClient):
 
         total_loss = 0
         num_batches = 0
+        first_batch_done = False
 
         for epoch in range(self.config.LOCAL_EPOCHS):
             for data, target in self.trainloader:
@@ -152,6 +153,14 @@ class BaseClient(fl.client.NumPyClient):
                 loss = self.criterion(output, target)
 
                 loss.backward()
+
+                # Diagnostic: Check gradients on first batch
+                if not first_batch_done:
+                    grad_norm = sum(p.grad.norm().item() ** 2 for p in self.model.parameters() if p.grad is not None) ** 0.5
+                    if grad_norm < 1e-7:
+                        print(f"  [WARNING] Client {self.cid}: Vanishing gradients (norm={grad_norm:.2e})")
+                    first_batch_done = True
+
                 self.optimizer.step()
 
                 total_loss += loss.item()
@@ -471,7 +480,19 @@ def run_single_experiment(
 
         return aggregated
 
-    # Select strategy
+    # Initialize global model for consistent starting point
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Initializing global model...")
+    init_model = IntrusionDetectionMLP(
+        input_dim=input_dim,
+        hidden_dims=base_config.HIDDEN_DIMS,
+        dropout=base_config.DROPOUT_RATE
+    ).to(base_config.DEVICE)
+
+    initial_parameters = ndarrays_to_parameters([
+        val.cpu().numpy() for _, val in init_model.state_dict().items()
+    ])
+
+    # Select strategy with initial parameters
     strategy_params = {
         "fraction_fit": base_config.CLIENT_FRACTION,
         "fraction_evaluate": 1.0,
@@ -479,6 +500,7 @@ def run_single_experiment(
         "min_available_clients": base_config.MIN_AVAILABLE_CLIENTS,
         "evaluate_metrics_aggregation_fn": weighted_avg,
         "fit_metrics_aggregation_fn": weighted_avg,
+        "initial_parameters": initial_parameters,
     }
 
     if experiment_config['aggregator'] == 'trimmed_mean':
