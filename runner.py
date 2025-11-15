@@ -34,45 +34,24 @@ from metrics import MetricsTracker, compute_comprehensive_metrics, aggregate_cli
 # ============================================================================
 
 class IntrusionDetectionMLP(nn.Module):
-    """Neural network for binary intrusion detection"""
+    """Neural network for binary intrusion detection - Simplified version"""
 
-    def __init__(self, input_dim: int, hidden_dims: List[int] = [128, 64, 32], dropout: float = 0.2):
+    def __init__(self, input_dim: int, hidden_dims: List[int] = [64, 32], dropout: float = 0.1):
         super().__init__()
         layers = []
         prev_dim = input_dim
 
         for hidden_dim in hidden_dims:
-            # Calculate number of groups for GroupNorm
-            # Use 32 groups if possible, otherwise use divisors
-            if hidden_dim >= 32 and hidden_dim % 32 == 0:
-                num_groups = 32
-            elif hidden_dim >= 16 and hidden_dim % 16 == 0:
-                num_groups = 16
-            elif hidden_dim >= 8 and hidden_dim % 8 == 0:
-                num_groups = 8
-            elif hidden_dim >= 4 and hidden_dim % 4 == 0:
-                num_groups = 4
-            else:
-                num_groups = 1
-
-            linear = nn.Linear(prev_dim, hidden_dim)
-            # Use Kaiming (He) initialization for ReLU activations
-            nn.init.kaiming_normal_(linear.weight, mode='fan_in', nonlinearity='relu')
-            nn.init.constant_(linear.bias, 0.01)  # Small positive bias
-
             layers.extend([
-                linear,
-                nn.GroupNorm(num_groups, hidden_dim),
+                nn.Linear(prev_dim, hidden_dim),
+                nn.BatchNorm1d(hidden_dim),  # Use BatchNorm instead of GroupNorm
                 nn.ReLU(),
                 nn.Dropout(dropout)
             ])
             prev_dim = hidden_dim
 
-        # Output layer with Xavier initialization
-        output_layer = nn.Linear(prev_dim, 1)
-        nn.init.xavier_normal_(output_layer.weight)
-        nn.init.constant_(output_layer.bias, 0.0)
-        layers.append(output_layer)
+        # Output layer
+        layers.append(nn.Linear(prev_dim, 1))
 
         self.network = nn.Sequential(*layers)
 
@@ -110,16 +89,12 @@ class BaseClient(fl.client.NumPyClient):
             pos_weight = torch.tensor([1.0]).to(config.DEVICE)
 
         self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        # Use Adam with higher learning rate and weight decay for better convergence
-        self.optimizer = optim.Adam(
+        # Use SGD with momentum for stable federated learning
+        self.optimizer = optim.SGD(
             model.parameters(),
             lr=config.LEARNING_RATE,
-            betas=(0.9, 0.999),
-            weight_decay=1e-5  # Add L2 regularization
-        )
-        # Add learning rate scheduler for adaptive learning
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=3, verbose=False
+            momentum=0.9,
+            weight_decay=1e-4  # L2 regularization
         )
         self.privacy_engine = None
 
@@ -180,8 +155,8 @@ class BaseClient(fl.client.NumPyClient):
 
                 loss.backward()
 
-                # Gradient clipping to prevent exploding gradients
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                # Gentle gradient clipping for stability
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
 
                 self.optimizer.step()
 
@@ -194,10 +169,6 @@ class BaseClient(fl.client.NumPyClient):
             if epoch_batches > 0:
                 avg_epoch_loss = epoch_loss / epoch_batches
                 epoch_losses.append(avg_epoch_loss)
-
-                # Update learning rate based on loss (only if not using DP)
-                if self.privacy_engine is None:
-                    self.scheduler.step(avg_epoch_loss)
 
         avg_loss = total_loss / num_batches if num_batches > 0 else 0
 

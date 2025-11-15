@@ -54,8 +54,8 @@ test_dataset = TensorDataset(
     torch.FloatTensor(y_test).view(-1, 1)
 )
 
-trainloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-testloader = DataLoader(test_dataset, batch_size=128)
+trainloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+testloader = DataLoader(test_dataset, batch_size=256)
 
 print(f"   Trainloader batches: {len(trainloader)}")
 print(f"   Testloader batches: {len(testloader)}")
@@ -68,8 +68,8 @@ print("\n2. Creating model...")
 
 model = IntrusionDetectionMLP(
     input_dim=X_train.shape[1],
-    hidden_dims=[128, 64, 32],
-    dropout=0.2
+    hidden_dims=[64, 32],
+    dropout=0.1
 ).to(config.DEVICE)
 
 print(f"   Model parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -83,10 +83,7 @@ pos_weight = torch.tensor([num_class_0 / num_class_1]).to(config.DEVICE)
 print(f"   Pos weight: {pos_weight.item():.4f}")
 
 criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-optimizer = optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.5, patience=3, verbose=True
-)
+optimizer = optim.SGD(model.parameters(), lr=0.002, momentum=0.9, weight_decay=1e-4)
 
 # ---------------------------------------------------------------------------
 # 3. Initial model predictions
@@ -134,7 +131,7 @@ for epoch in range(10):
         loss.backward()
 
         # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
 
         # Gradient norm check
         if epoch == 0 and batch_idx == 0:
@@ -152,9 +149,6 @@ for epoch in range(10):
 
     avg_loss = total_loss / num_batches
 
-    # Update learning rate
-    scheduler.step(avg_loss)
-
     # Evaluate
     model.eval()
     correct = 0
@@ -170,8 +164,7 @@ for epoch in range(10):
             total += target.size(0)
 
     accuracy = correct / total
-    current_lr = optimizer.param_groups[0]['lr']
-    print(f"   Epoch {epoch+1}: Loss={avg_loss:.4f}, Accuracy={accuracy:.4f}, LR={current_lr:.6f}")
+    print(f"   Epoch {epoch+1}: Loss={avg_loss:.4f}, Accuracy={accuracy:.4f}")
 
     model.train()
 

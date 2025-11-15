@@ -1,119 +1,118 @@
-# Accuracy Improvements - Summary
+# Accuracy Improvements - Summary (Version 2)
 
 ## Problem Statement
 
-The model was **not learning** during federated training:
+The model was **not learning** during federated training with severe oscillation:
 - Final accuracy: **44.9%** (essentially random)
 - Final F1 score: **0.0** (predicting only majority class)
 - Loss stuck at **~0.623** across all 50 rounds
-- Model oscillating between two states without improvement
+- **Model oscillating between exactly two states** - critical symptom
+- Oscillates between F1=0.0 (acc=44.9%) and F1=0.71 (acc=55%)
 - Best F1 was 0.71 at round 2, then degraded
 
 ## Root Cause Analysis
 
-### Primary Issues:
-1. **Learning Rate Too Low (0.001)**
-   - With 10 clients and federated averaging, effective learning rate was even smaller
-   - Model couldn't escape initial state or local minima
-   - Gradients too small to make meaningful parameter updates
+### Primary Issue: INSTABILITY IN FEDERATED TRAINING
+The oscillation pattern revealed fundamental instability:
+1. **Adam optimizer + High LR causing oscillation**
+   - Initial fix of LR=0.01 was TOO HIGH for federated setting
+   - Each client overshoots during local training
+   - Aggregated weights bounce between states instead of converging
 
-2. **Insufficient Training Per Round**
-   - Only 5 local epochs per client
-   - Combined with low learning rate, clients made minimal progress
+2. **Complex Model Architecture**
+   - 3-layer network [128, 64, 32] too complex for stable convergence
+   - GroupNorm may not work well with federated aggregation
+   - Too many parameters to stabilize with limited local data
 
-3. **Poor Weight Initialization**
-   - Default PyTorch initialization not optimal for deep networks
-   - All clients started with identical weights
+3. **Aggressive Hyperparameters**
+   - Too many local epochs (10) with high LR causes massive overshooting
+   - Small batch size (128) creates high variance in gradients
+   - Tight gradient clipping (1.0) may interfere with learning
 
-### Secondary Issues:
-1. **High Dropout (0.3)** - Too aggressive regularization during learning phase
-2. **No Learning Rate Scheduling** - Fixed LR prevented adaptive learning
-3. **No Gradient Monitoring** - Couldn't detect vanishing/exploding gradients
+## Implemented Fixes (V2 - STABILITY-FOCUSED)
 
-## Implemented Fixes
-
-### 1. Learning Rate Increase ⭐ CRITICAL
-**File**: `config.py`
-```python
-LEARNING_RATE = 0.01  # Increased from 0.001 (10x increase)
-```
-**Impact**: Enables model to make meaningful updates and escape local minima
-
-### 2. Increased Local Training
-**File**: `config.py`
-```python
-LOCAL_EPOCHS = 10  # Increased from 5
-```
-**Impact**: Each client trains longer per round, making better use of local data
-
-### 3. Reduced Dropout
-**File**: `config.py`
-```python
-DROPOUT_RATE = 0.2  # Reduced from 0.3
-```
-**Impact**: Less aggressive regularization allows better learning
-
-### 4. Learning Rate Scheduling
+### 1. Switch to SGD with Momentum ⭐ CRITICAL
 **File**: `runner.py` - `BaseClient.__init__()`
 ```python
-self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-    self.optimizer, mode='min', factor=0.5, patience=3, verbose=False
-)
-```
-**Impact**: Adapts learning rate based on loss, enables fine-tuning
-
-### 5. Weight Decay (L2 Regularization)
-**File**: `runner.py` - `BaseClient.__init__()`
-```python
-self.optimizer = optim.Adam(
+self.optimizer = optim.SGD(
     model.parameters(),
-    lr=config.LEARNING_RATE,
-    betas=(0.9, 0.999),
-    weight_decay=1e-5  # Added L2 regularization
+    lr=config.LEARNING_RATE,  # 0.002
+    momentum=0.9,
+    weight_decay=1e-4
 )
 ```
-**Impact**: Prevents overfitting and improves generalization
+**Impact**: SGD more stable than Adam for federated learning, consistent momentum helps convergence
 
-### 6. Gradient Clipping
-**File**: `runner.py` - `BaseClient.fit()`
+### 2. Conservative Learning Rate
+**File**: `config.py`
 ```python
-torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+LEARNING_RATE = 0.002  # Conservative, stable learning
 ```
-**Impact**: Prevents exploding gradients, stabilizes training
+**Impact**: Prevents oscillation while still enabling progress
 
-### 7. Improved Weight Initialization
-**File**: `runner.py` - `IntrusionDetectionMLP.__init__()`
+### 3. Simplified Model Architecture
+**File**: `config.py` and `runner.py`
 ```python
-# Kaiming (He) initialization for ReLU layers
-nn.init.kaiming_normal_(linear.weight, mode='fan_in', nonlinearity='relu')
-nn.init.constant_(linear.bias, 0.01)
-
-# Xavier initialization for output layer
-nn.init.xavier_normal_(output_layer.weight)
-nn.init.constant_(output_layer.bias, 0.0)
+HIDDEN_DIMS = [64, 32]  # Reduced from [128, 64, 32]
 ```
-**Impact**: Better initial weights lead to faster convergence
+**Impact**: Simpler model is easier to train and stabilize in federated setting
 
-### 8. Enhanced Monitoring
-**File**: `runner.py` - `BaseClient.fit()`
-- NaN loss detection
-- Learning rate tracking in metrics
-- Per-epoch loss tracking
-- Scheduler updates based on validation loss
+### 4. BatchNorm Instead of GroupNorm
+**File**: `runner.py` - `IntrusionDetectionMLP`
+```python
+nn.BatchNorm1d(hidden_dim)  # Instead of GroupNorm
+```
+**Impact**: BatchNorm better suited for federated learning, standard approach
+
+### 5. Larger Batch Size
+**File**: `config.py`
+```python
+BATCH_SIZE = 256  # Increased from 128
+```
+**Impact**: Reduces gradient variance, more stable updates
+
+### 6. Moderate Local Epochs
+**File**: `config.py`
+```python
+LOCAL_EPOCHS = 5  # Balanced training per round
+```
+**Impact**: Enough training without overshooting
+
+### 7. Minimal Dropout
+**File**: `config.py`
+```python
+DROPOUT_RATE = 0.1  # Reduced from 0.3
+```
+**Impact**: Less regularization during learning phase
+
+### 8. Gentler Gradient Clipping
+**File**: `runner.py`
+```python
+torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+```
+**Impact**: Prevents explosions without overly constraining gradients
+
+### 9. Removed Learning Rate Scheduler
+**File**: `runner.py`
+```python
+# Scheduler disabled - can interfere with FL
+```
+**Impact**: Consistent learning rate across all clients and rounds
 
 ## Expected Improvements
 
 ### Performance Metrics:
-- **Final Accuracy**: Should reach **70-85%** (vs current 44.9%)
-- **Final F1 Score**: Should reach **0.65-0.80** (vs current 0.0)
-- **Loss Reduction**: Should decrease from ~0.62 to **0.3-0.4**
-- **Convergence**: Should converge within **20-30 rounds** (vs not converging)
+- **Final Accuracy**: Should reach **70-80%** (vs current 44.9%)
+- **Final F1 Score**: Should reach **0.60-0.75** (vs current 0.0)
+- **Loss Reduction**: Should decrease steadily from ~0.62 to **0.35-0.45**
+- **Convergence**: Should converge within **25-35 rounds** (vs not converging)
 
 ### Training Behavior:
-- Steady loss decrease instead of oscillation
-- Consistent improvement in F1 score
-- Balanced predictions (not just majority class)
-- Gradual learning rate reduction as model converges
+- **NO MORE OSCILLATION** - steady monotonic improvement
+- Consistent F1 score increases (not bouncing between 0 and 0.71)
+- Balanced predictions across both classes
+- Stable loss decrease without sudden jumps
+- All clients contribute meaningfully to global model
 
 ## Testing Recommendations
 
@@ -136,24 +135,34 @@ nn.init.constant_(output_layer.bias, 0.0)
    - Previous best F1: **0.71** (round 2)
    - New expected best F1: **>0.75** (within 15 rounds)
 
+## Changelog
+
+### Version 2 (Current) - STABILITY FIX
+After V1 still showed oscillation, diagnosed as:
+- Adam optimizer instability in FL setting
+- Model too complex for stable convergence
+- Learning rate still too high
+
+**V2 Changes**:
+- SGD instead of Adam
+- Simpler architecture [64, 32]
+- LR = 0.002 (conservative)
+- Larger batch size (256)
+- Removed scheduler
+- BatchNorm instead of GroupNorm
+
+### Version 1 - INITIAL FIX (Unsuccessful)
+- Increased LR to 0.01 (caused oscillation)
+- Added scheduler (may have interfered)
+- Increased local epochs to 10 (too many)
+- Complex initialization (unnecessary)
+
 ## Files Modified
 
-1. **config.py**: Core hyperparameters (LR, epochs, dropout)
-2. **runner.py**: Training loop, initialization, scheduling
-3. **debug_training.py**: Updated to match new configuration
-
-## Rollback Instructions
-
-If these changes cause issues, revert with:
-```bash
-git checkout HEAD~1 config.py runner.py debug_training.py
-```
-
-Original values:
-- `LEARNING_RATE = 0.001`
-- `LOCAL_EPOCHS = 5`
-- `DROPOUT_RATE = 0.3`
-- No scheduler, no weight decay, no gradient clipping
+1. **config.py**: Hyperparameters (LR=0.002, epochs=5, batch=256, simpler model)
+2. **runner.py**: SGD optimizer, simplified architecture, BatchNorm
+3. **debug_training.py**: Updated to match configuration
+4. **ACCURACY_IMPROVEMENTS.md**: This documentation
 
 ## Next Steps
 
