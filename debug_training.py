@@ -54,8 +54,8 @@ test_dataset = TensorDataset(
     torch.FloatTensor(y_test).view(-1, 1)
 )
 
-trainloader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-testloader = DataLoader(test_dataset, batch_size=128)
+trainloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+testloader = DataLoader(test_dataset, batch_size=256)
 
 print(f"   Trainloader batches: {len(trainloader)}")
 print(f"   Testloader batches: {len(testloader)}")
@@ -68,8 +68,8 @@ print("\n2. Creating model...")
 
 model = IntrusionDetectionMLP(
     input_dim=X_train.shape[1],
-    hidden_dims=[128, 64, 32],
-    dropout=0.3
+    hidden_dims=[64, 32],
+    dropout=0.1
 ).to(config.DEVICE)
 
 print(f"   Model parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -83,7 +83,7 @@ pos_weight = torch.tensor([num_class_0 / num_class_1]).to(config.DEVICE)
 print(f"   Pos weight: {pos_weight.item():.4f}")
 
 criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+optimizer = optim.SGD(model.parameters(), lr=0.002, momentum=0.9, weight_decay=1e-4)
 
 # ---------------------------------------------------------------------------
 # 3. Initial model predictions
@@ -129,6 +129,9 @@ for epoch in range(10):
             break
 
         loss.backward()
+
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
 
         # Gradient norm check
         if epoch == 0 and batch_idx == 0:

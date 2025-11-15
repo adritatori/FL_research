@@ -49,14 +49,14 @@ class ExperimentConfig:
     MIN_AVAILABLE_CLIENTS = 8
     NUM_ROUNDS = 50  # Max rounds (can early stop, reduced from 100)
 
-    # Training
-    LOCAL_EPOCHS = 5
-    BATCH_SIZE = 128
-    LEARNING_RATE = 0.001
+    # Training - Conservative approach for stable learning
+    LOCAL_EPOCHS = 5  # Moderate local training
+    BATCH_SIZE = 256  # Larger batches for stability
+    LEARNING_RATE = 0.002  # Conservative learning rate
 
-    # Model
-    HIDDEN_DIMS = [128, 64, 32]
-    DROPOUT_RATE = 0.3
+    # Model - Simpler architecture
+    HIDDEN_DIMS = [64, 32]  # Smaller, simpler model
+    DROPOUT_RATE = 0.1  # Minimal dropout
 
     # Differential Privacy
     TARGET_DELTA = 1e-5
