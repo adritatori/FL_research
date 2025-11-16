@@ -642,11 +642,11 @@ def run_single_experiment(
         if not metrics:
             return {}
 
-        sample_metrics = metrics[0][1]
         aggregated = {}
 
         for key in ['accuracy', 'f1', 'auc_roc', 'auc_pr', 'loss', 'latency', 'cpu_time']:
-            if key in sample_metrics:
+            # Only aggregate if ALL clients have this metric
+            if all(key in m for _, m in metrics):
                 values = [m[key] * n for n, m in metrics]
                 total = sum(n for n, _ in metrics)
                 if total > 0:
