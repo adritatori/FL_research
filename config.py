@@ -125,7 +125,7 @@ class ExperimentConfig:
         elif cls.PHASE == "aggregators":
             return {
                 'name': 'Aggregator Comparison',
-                'description': 'Compare aggregation strategies under attacks',
+                'description': 'Compare aggregation strategies under attacks (including Krum and model poisoning)',
                 'configs': [
                     {
                         'epsilon': float('inf'),
@@ -133,9 +133,9 @@ class ExperimentConfig:
                         'attack_type': attack,
                         'attack_ratio': ratio,
                     }
-                    for agg in ['fedavg', 'trimmed_mean', 'median']
-                    for attack in ['none', 'label_flip']
-                    for ratio in ([0.0] if attack == 'none' else [0.1, 0.2, 0.3])
+                    for agg in ['fedavg', 'trimmed_mean', 'median', 'krum']
+                    for attack in ['none', 'label_flip', 'model_poisoning']
+                    for ratio in ([0.0] if attack == 'none' else [0.2, 0.4])
                 ],
                 'num_rounds': 50,
                 'use_sample': False,
