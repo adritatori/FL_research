@@ -42,23 +42,13 @@ class IntrusionDetectionMLP(nn.Module):
         prev_dim = input_dim
 
         for hidden_dim in hidden_dims:
-            # Use GroupNorm for differential privacy compatibility
-            # GroupNorm is privacy-safe (doesn't create dependencies between samples)
-            # Calculate optimal number of groups
-            if hidden_dim >= 32 and hidden_dim % 32 == 0:
-                num_groups = 32
-            elif hidden_dim >= 16 and hidden_dim % 16 == 0:
-                num_groups = 16
-            elif hidden_dim >= 8 and hidden_dim % 8 == 0:
-                num_groups = 8
-            elif hidden_dim >= 4 and hidden_dim % 4 == 0:
-                num_groups = 4
-            else:
-                num_groups = 1
-
+            # Use LayerNorm (GroupNorm with 1 group) for differential privacy compatibility
+            # LayerNorm is privacy-safe (doesn't create dependencies between samples)
+            # NOTE: GroupNorm with multiple groups causes zero gradients and prevents learning
+            # Using num_groups=1 (equivalent to LayerNorm) fixes this issue
             layers.extend([
                 nn.Linear(prev_dim, hidden_dim),
-                nn.GroupNorm(num_groups, hidden_dim),  # GroupNorm for DP compatibility
+                nn.GroupNorm(1, hidden_dim),  # LayerNorm equivalent, DP-safe
                 nn.ReLU(),
                 nn.Dropout(dropout)
             ])
