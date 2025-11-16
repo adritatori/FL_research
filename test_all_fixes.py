@@ -1,18 +1,3 @@
-Tests both user-suggested fixes AND alternative hypotheses to find what works.
-
-Your epsilon=5.0 results: 45% acc, F1=0.0, AUC=0.5 (complete failure)
-
-Tests:
-1. No DP (epsilon=inf) - Confirms if DP is the root cause
-2. Lower LR (0.0005) - User suggestion
-3. Higher LR (0.05) - DP-SGD theory suggestion
-4. Smaller batch (64) - Opacus optimization
-5. More epochs (10) - User suggestion
-6. Combined optimal - Best combination
-
-Will empirically determine which approach works!
-"""
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
