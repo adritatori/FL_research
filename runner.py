@@ -266,16 +266,20 @@ class BaseClient(fl.client.NumPyClient):
 
 
 class MaliciousClient(BaseClient):
-    """Client that performs label flip attack"""
+    """Client that performs various Byzantine attacks"""
 
     def __init__(self, cid: int, model: nn.Module, trainloader: DataLoader,
-                 testloader: DataLoader, config: ExperimentConfig, attack_type: str):
+                 testloader: DataLoader, config: ExperimentConfig, attack_type: str,
+                 scaling_factor: float = 10.0):
         super().__init__(cid, model, trainloader, testloader, config)
         self.attack_type = attack_type
+        self.scaling_factor = scaling_factor  # For model poisoning attack
 
     def fit(self, parameters: NDArrays, config: Dict) -> Tuple[NDArrays, int, Dict]:
         if self.attack_type == 'label_flip':
             return self._label_flip_attack(parameters, config)
+        elif self.attack_type == 'model_poisoning':
+            return self._model_poisoning_attack(parameters, config)
         else:
             return super().fit(parameters, config)
 
@@ -308,6 +312,60 @@ class MaliciousClient(BaseClient):
         }
 
         return updated_params, len(self.trainloader.dataset), metrics
+
+    def _model_poisoning_attack(self, parameters: NDArrays, config: Dict):
+        """
+        Model poisoning attack - scales model updates to have disproportionate influence.
+
+        This attack amplifies the gradient updates from this client, causing the aggregated
+        model to move significantly towards the malicious update. More sophisticated than
+        label flipping as it directly manipulates the model parameters.
+
+        Reference: Fang et al., "Local Model Poisoning Attacks to Byzantine-Resilient
+        Federated Learning" (USENIX Security 2020)
+        """
+        # Store original parameters
+        original_params = [p.copy() for p in parameters]
+        self.set_parameters(parameters)
+        self.model.train()
+
+        start_time = time.time()
+
+        # Train normally first
+        for epoch in range(self.config.LOCAL_EPOCHS):
+            for data, target in self.trainloader:
+                data = data.to(self.config.DEVICE)
+                target = target.to(self.config.DEVICE)
+
+                self.optimizer.zero_grad()
+                output = self.model(data)
+                loss = self.criterion(output, target)
+                loss.backward()
+                self.optimizer.step()
+
+        # Get trained parameters
+        trained_params = self.get_parameters(config={})
+
+        # Compute and scale the update (poisoning)
+        # delta = trained - original, then scale: poisoned = original + scale * delta
+        poisoned_params = []
+        for orig, trained in zip(original_params, trained_params):
+            delta = trained - orig
+            # Scale up the update to have outsized influence
+            poisoned = orig + self.scaling_factor * delta
+            poisoned_params.append(poisoned)
+
+        latency = time.time() - start_time
+
+        metrics = {
+            'client_id': self.cid,
+            'latency': latency,
+            'attack_type': 'model_poisoning',
+            'scaling_factor': self.scaling_factor,
+            'num_examples': len(self.trainloader.dataset),
+        }
+
+        return poisoned_params, len(self.trainloader.dataset), metrics
 
 
 # ============================================================================
@@ -374,6 +432,91 @@ class MedianStrategy(FedAvg):
         for layer_idx in range(len(weights[0])):
             layer_weights = np.stack([w[layer_idx] for w in weights])
             aggregated_layer = np.median(layer_weights, axis=0)
+            aggregated.append(aggregated_layer)
+
+        parameters_aggregated = ndarrays_to_parameters(aggregated)
+
+        metrics_aggregated = {}
+        if self.fit_metrics_aggregation_fn:
+            fit_metrics = [(res.num_examples, res.metrics) for _, res in results]
+            metrics_aggregated = self.fit_metrics_aggregation_fn(fit_metrics)
+
+        return parameters_aggregated, metrics_aggregated
+
+
+class KrumStrategy(FedAvg):
+    """
+    Krum aggregation - Byzantine-resilient aggregation
+
+    Selects the model update with minimum sum of distances to its closest neighbors.
+    Widely used in FL-NIDS papers (SecFedNIDS, FLAIR).
+
+    Reference: Blanchard et al., "Machine Learning with Adversaries: Byzantine Tolerant
+    Gradient Descent" (NeurIPS 2017)
+    """
+
+    def __init__(self, num_byzantine: int = 0, multi_krum: int = 1, **kwargs):
+        """
+        Args:
+            num_byzantine: Expected number of Byzantine/malicious clients (f)
+            multi_krum: Number of updates to select and average (m).
+                       m=1 is standard Krum, m>1 is Multi-Krum
+        """
+        super().__init__(**kwargs)
+        self.num_byzantine = num_byzantine
+        self.multi_krum = multi_krum
+
+    def aggregate_fit(self, server_round, results, failures):
+        if not results:
+            return None, {}
+
+        weights_results = [
+            (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples)
+            for _, fit_res in results
+        ]
+
+        weights = [w for w, _ in weights_results]
+        num_clients = len(weights)
+
+        # Krum requires at least 2f + 3 clients
+        f = self.num_byzantine
+        if num_clients < 2 * f + 3:
+            # Fall back to FedAvg if not enough clients
+            print(f"[Krum] Warning: Not enough clients ({num_clients}) for f={f}. "
+                  f"Need at least {2*f+3}. Falling back to FedAvg.")
+            return super().aggregate_fit(server_round, results, failures)
+
+        # Flatten weights for distance computation
+        flattened_weights = []
+        for w in weights:
+            flat = np.concatenate([layer.flatten() for layer in w])
+            flattened_weights.append(flat)
+        flattened_weights = np.array(flattened_weights)
+
+        # Compute pairwise distances
+        num_to_consider = num_clients - f - 2  # n - f - 2 closest neighbors
+
+        scores = []
+        for i in range(num_clients):
+            distances = []
+            for j in range(num_clients):
+                if i != j:
+                    dist = np.linalg.norm(flattened_weights[i] - flattened_weights[j]) ** 2
+                    distances.append(dist)
+
+            # Sort distances and sum the closest (n - f - 2) neighbors
+            distances.sort()
+            score = sum(distances[:num_to_consider])
+            scores.append(score)
+
+        # Select indices with minimum scores
+        selected_indices = np.argsort(scores)[:self.multi_krum]
+
+        # Aggregate selected weights
+        aggregated = []
+        for layer_idx in range(len(weights[0])):
+            layer_weights = np.stack([weights[i][layer_idx] for i in selected_indices])
+            aggregated_layer = np.mean(layer_weights, axis=0)
             aggregated.append(aggregated_layer)
 
         parameters_aggregated = ndarrays_to_parameters(aggregated)
@@ -543,6 +686,10 @@ def run_single_experiment(
         strategy = TrimmedMeanStrategy(**strategy_params, trim_ratio=base_config.TRIM_RATIO)
     elif experiment_config['aggregator'] == 'median':
         strategy = MedianStrategy(**strategy_params)
+    elif experiment_config['aggregator'] == 'krum':
+        # Set num_byzantine based on attack ratio
+        num_byzantine = int(experiment_config['attack_ratio'] * base_config.NUM_CLIENTS)
+        strategy = KrumStrategy(**strategy_params, num_byzantine=num_byzantine, multi_krum=1)
     else:
         strategy = FedAvg(**strategy_params)
 
