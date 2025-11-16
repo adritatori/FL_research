@@ -1,3 +1,27 @@
+Tests different configurations to identify why epsilon=5.0 DP training fails completely.
+
+Results to check:
+- Current epsilon=5.0: 45% acc, F1=0.0, AUC=0.5 (FAILED)
+- Expected: 65-70% acc
+
+Hypotheses:
+1. Batch size too large (256) for Opacus
+2. Learning rate still too low (0.01)
+3. Gradient flow issues
+4. Class imbalance handling
+"""
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+from opacus import PrivacyEngine
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
+import numpy as np
+import sys
+from pathlib import Path
 import sys
 from pathlib import Path
 
