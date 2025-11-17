@@ -145,17 +145,18 @@ class ExperimentConfig:
         elif cls.PHASE == "attacks":
             return {
                 'name': 'Attack Scenarios',
-                'description': 'Comprehensive attack analysis with DP',
+                'description': 'Comprehensive attack analysis with DP (epsilon 0.3, 0.5) and robust aggregators',
                 'configs': [
                     {
                         'epsilon': eps,
                         'aggregator': agg,
-                        'attack_type': 'label_flip',
+                        'attack_type': attack,
                         'attack_ratio': ratio,
                     }
-                    for eps in [1.0, 5.0, float('inf')]
-                    for agg in ['fedavg', 'trimmed_mean', 'median']
-                    for ratio in [0.1, 0.2, 0.3]
+                    for eps in [0.3, 0.5, float('inf')]
+                    for agg in ['fedavg', 'trimmed_mean', 'median', 'krum']
+                    for attack in ['none', 'label_flip', 'model_poisoning']
+                    for ratio in ([0.0] if attack == 'none' else [0.2, 0.4])
                 ],
                 'num_rounds': 50,
                 'use_sample': False,
