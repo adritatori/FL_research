@@ -103,6 +103,12 @@ class ExperimentConfig:
                         'attack_type': 'none',
                         'attack_ratio': 0.0,
                     },
+                    {
+                        'epsilon': float('inf'),
+                        'aggregator': 'krum',  # ADD THIS
+                        'attack_type': 'none',
+                        'attack_ratio': 0.0,
+                    },
                 ],
                 'num_rounds': 50,
                 'use_sample': False,
@@ -115,7 +121,7 @@ class ExperimentConfig:
                 'description': 'Analyze privacy-utility tradeoff across epsilon values',
                 'configs': [
                     {'epsilon': eps, 'aggregator': 'fedavg', 'attack_type': 'none', 'attack_ratio': 0.0}
-                    for eps in [0.5, 1.0, 5.0, float('inf')]
+                    for eps in [1.0, 3.0, 5.0, 7.0, float('inf')]
                 ],
                 'num_rounds': 50,
                 'use_sample': False,
@@ -153,7 +159,7 @@ class ExperimentConfig:
                         'attack_type': attack,
                         'attack_ratio': ratio,
                     }
-                    for eps in [0.3, 0.5, float('inf')]
+                    for eps in [5.0, float('inf'),3.0]
                     for agg in ['fedavg', 'trimmed_mean', 'median', 'krum']
                     for attack in ['none', 'label_flip', 'model_poisoning']
                     for ratio in ([0.0] if attack == 'none' else [0.2, 0.4])
