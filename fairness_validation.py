@@ -1,15 +1,16 @@
 """
-Fairness Validation for FL-NIDS (Binary Classification) - CORRECTED
-====================================================================
-Fixed to exactly match Phase 4 architecture.
+Fairness Validation for FL-NIDS (Binary Classification) - FIXED
+================================================================
+Direct evaluation of final global model to collect predictions.
 
-Key fixes:
-1. MedianStrategy properly inherits metrics aggregation from FedAvg
-2. Added evaluate_metrics_aggregation_fn and fit_metrics_aggregation_fn
-3. Proper final model evaluation
-4. Exact match to Phase 4 hyperparameters and structure
+This version:
+1. Trains the federated model normally
+2. After training completes, evaluates the FINAL GLOBAL MODEL directly
+3. Collects predictions from this evaluation
+4. Performs per-attack-type fairness analysis
 
-Configs: ε=∞, 5.0, 3.0, 1.0 with Median + 40% Label Flip
+Key insight: Don't rely on Flower's metric aggregation for predictions.
+Instead, evaluate the final model parameters directly.
 """
 
 import os
@@ -50,7 +51,7 @@ class FairnessConfig:
     DATA_PATH = '/content/drive/MyDrive/IDSDatasets/UNSW 15'
     OUTPUT_DIR = './fairness_results'
 
-    # Fixed parameters (EXACT match to Phase 4)
+    # Fixed parameters
     RANDOM_SEED = 42
     NUM_CLIENTS = 10
     CLIENT_FRACTION = 1.0
@@ -66,15 +67,14 @@ class FairnessConfig:
     MAX_GRAD_NORM = 10.0
     TEST_SIZE = 0.2
 
-    # Device configuration for T4 GPU (Google Colab)
+    # Device configuration
     if torch.cuda.is_available():
         DEVICE = torch.device('cuda:0')
         print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-        # Set CUDA memory allocation strategy for T4
         torch.cuda.empty_cache()
     else:
         DEVICE = torch.device('cpu')
-        print("WARNING: CUDA not available, using CPU (will be very slow)")
+        print("WARNING: CUDA not available, using CPU")
 
     # Experiments
     EXPERIMENTS = [
@@ -97,7 +97,7 @@ config = FairnessConfig()
 
 
 # ============================================================================
-# NEURAL NETWORK - EXACT MATCH to Phase 4
+# NEURAL NETWORK
 # ============================================================================
 
 class IntrusionDetectionMLP(nn.Module):
@@ -111,7 +111,7 @@ class IntrusionDetectionMLP(nn.Module):
         for hidden_dim in hidden_dims:
             layers.extend([
                 nn.Linear(prev_dim, hidden_dim),
-                nn.GroupNorm(1, hidden_dim),  # DP-safe normalization
+                nn.GroupNorm(1, hidden_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout)
             ])
@@ -125,20 +125,19 @@ class IntrusionDetectionMLP(nn.Module):
 
 
 # ============================================================================
-# FEDERATED LEARNING CLIENTS - EXACT MATCH to Phase 4
+# FEDERATED LEARNING CLIENTS
 # ============================================================================
 
 class BaseClient(fl.client.NumPyClient):
-    """Standard FL client - EXACT match to Phase 4"""
+    """Standard FL client"""
 
-    def __init__(self, cid: int, model: nn.Module, trainloader: DataLoader,
-                 testloader: DataLoader):
+    def __init__(self, cid: int, model: nn.Module, trainloader: DataLoader, testloader: DataLoader):
         self.cid = cid
         self.model = model
         self.trainloader = trainloader
         self.testloader = testloader
 
-        # Calculate pos_weight for imbalanced classes
+        # Calculate pos_weight
         all_labels = []
         for _, labels in trainloader:
             all_labels.extend(labels.numpy().flatten())
@@ -162,21 +161,18 @@ class BaseClient(fl.client.NumPyClient):
         self.privacy_engine = None
 
     def setup_dp(self, epsilon: float, num_rounds: int):
-        """Setup differential privacy - EXACT match to Phase 4"""
+        """Setup differential privacy"""
         if epsilon == float('inf'):
             return
 
-        # Adaptive LR based on epsilon (EXACT match to Phase 4)
+        # Adaptive LR
         if epsilon <= 1.0:
-            adaptive_lr = 0.05  # 25x increase
-            print(f"  [DP] Client {self.cid}: Using adaptive LR={adaptive_lr} for epsilon={epsilon}")
+            adaptive_lr = 0.05
         elif epsilon <= 5.0:
-            adaptive_lr = 0.01  # 5x increase
-            print(f"  [DP] Client {self.cid}: Using adaptive LR={adaptive_lr} for epsilon={epsilon}")
+            adaptive_lr = 0.01
         else:
-            adaptive_lr = 0.005  # 2.5x increase
+            adaptive_lr = 0.005
 
-        # Recreate optimizer with adaptive LR
         self.optimizer = optim.SGD(
             self.model.parameters(),
             lr=adaptive_lr,
@@ -219,14 +215,11 @@ class BaseClient(fl.client.NumPyClient):
                 output = self.model(data)
                 loss = self.criterion(output, target)
 
-                # Check for NaN loss
                 if torch.isnan(loss):
-                    print(f"  [ERROR] Client {self.cid}: NaN loss detected!")
                     continue
 
                 loss.backward()
 
-                # Gradient clipping (only if not using DP)
                 if self.privacy_engine is None:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
 
@@ -254,7 +247,6 @@ class BaseClient(fl.client.NumPyClient):
         self.model.eval()
 
         all_preds = []
-        all_probs = []
         all_labels = []
         total_loss = 0
 
@@ -268,17 +260,12 @@ class BaseClient(fl.client.NumPyClient):
                 loss = self.criterion(logits, target)
                 total_loss += loss.item()
 
-                probs = output.cpu().numpy()
                 preds = (output > 0.5).float().cpu().numpy()
-
-                all_probs.extend(probs.flatten())
                 all_preds.extend(preds.flatten())
                 all_labels.extend(target.cpu().numpy().flatten())
 
-        # Compute metrics
         all_labels = np.array(all_labels)
         all_preds = np.array(all_preds)
-        all_probs = np.array(all_probs)
 
         f1 = f1_score(all_labels, all_preds, zero_division=0)
         accuracy = accuracy_score(all_labels, all_preds)
@@ -294,7 +281,7 @@ class BaseClient(fl.client.NumPyClient):
 
 
 class MaliciousClient(BaseClient):
-    """Client performing label flip attack - EXACT match to Phase 4"""
+    """Client performing label flip attack"""
 
     def fit(self, parameters: NDArrays, config_dict: Dict) -> Tuple[NDArrays, int, Dict]:
         self.set_parameters(parameters)
@@ -322,11 +309,11 @@ class MaliciousClient(BaseClient):
 
 
 # ============================================================================
-# AGGREGATION STRATEGY - EXACT MATCH to Phase 4
+# AGGREGATION STRATEGY
 # ============================================================================
 
 class MedianStrategy(FedAvg):
-    """Coordinate-wise median aggregation - EXACT match to Phase 4"""
+    """Coordinate-wise median aggregation"""
 
     def aggregate_fit(self, server_round, results, failures):
         if not results:
@@ -347,13 +334,76 @@ class MedianStrategy(FedAvg):
 
         parameters_aggregated = ndarrays_to_parameters(aggregated)
 
-        # Aggregate metrics using parent class method
         metrics_aggregated = {}
         if self.fit_metrics_aggregation_fn:
             fit_metrics = [(res.num_examples, res.metrics) for _, res in results]
             metrics_aggregated = self.fit_metrics_aggregation_fn(fit_metrics)
 
         return parameters_aggregated, metrics_aggregated
+
+
+# ============================================================================
+# DIRECT MODEL EVALUATION (KEY FIX)
+# ============================================================================
+
+def evaluate_final_model(final_parameters: NDArrays, X_test: np.ndarray, y_test: np.ndarray,
+                         input_dim: int) -> Tuple[np.ndarray, np.ndarray, float, float]:
+    """
+    Evaluate the final global model directly on test data.
+
+    This is the KEY function that solves the prediction collection problem.
+    """
+    print("  [EVAL] Evaluating final global model...")
+
+    # Create fresh model
+    model = IntrusionDetectionMLP(
+        input_dim=input_dim,
+        hidden_dims=config.HIDDEN_DIMS,
+        dropout=config.DROPOUT_RATE
+    ).to(config.DEVICE)
+
+    # Load final parameters
+    params_dict = zip(model.state_dict().keys(), final_parameters)
+    state_dict = {k: torch.tensor(v) for k, v in params_dict}
+    model.load_state_dict(state_dict, strict=True)
+
+    # Evaluate
+    model.eval()
+
+    test_dataset = TensorDataset(
+        torch.FloatTensor(X_test),
+        torch.FloatTensor(y_test).view(-1, 1)
+    )
+    test_loader = DataLoader(test_dataset, batch_size=config.BATCH_SIZE)
+
+    all_preds = []
+    all_probs = []
+    all_labels = []
+
+    with torch.no_grad():
+        for data, target in test_loader:
+            data = data.to(config.DEVICE)
+
+            logits = model(data)
+            probs = torch.sigmoid(logits)
+            preds = (probs > 0.5).float()
+
+            all_probs.extend(probs.cpu().numpy().flatten())
+            all_preds.extend(preds.cpu().numpy().flatten())
+            all_labels.extend(target.numpy().flatten())
+
+    y_pred = np.array(all_preds)
+    y_prob = np.array(all_probs)
+    y_true = np.array(all_labels)
+
+    # Compute metrics
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    accuracy = accuracy_score(y_true, y_pred)
+
+    print(f"  [EVAL] Final model F1: {f1:.4f}, Accuracy: {accuracy:.4f}")
+    print(f"  [EVAL] Predictions collected: {len(y_pred)}")
+
+    return y_pred, y_prob, f1, accuracy
 
 
 # ============================================================================
@@ -367,7 +417,6 @@ def load_unsw_data():
     print("LOADING UNSW-NB15 DATASET")
     print("=" * 80)
 
-    # Try different file patterns
     df = None
     for filename in ['UNSW-NB15.csv', 'UNSW_NB15_training-set.csv']:
         filepath = os.path.join(config.DATA_PATH, filename)
@@ -430,17 +479,15 @@ def iid_partition(X: np.ndarray, y: np.ndarray, num_clients: int) -> List[Tuple]
 
 
 # ============================================================================
-# SINGLE EXPERIMENT RUNNER
+# SINGLE EXPERIMENT RUNNER (FIXED)
 # ============================================================================
 
 def run_experiment(X_train, y_train, X_test, y_test, attack_categories_test,
                    exp_config: Dict, input_dim: int) -> Dict:
-    """Run single fairness experiment - EXACT match to Phase 4 logic"""
+    """Run single fairness experiment with DIRECT final model evaluation"""
 
     print(f"\n{'='*80}")
     print(f"EXPERIMENT: {exp_config['name']}")
-    print(f"ε={exp_config['epsilon']}, {exp_config['aggregator']}, "
-          f"{exp_config['attack_type']} ({exp_config['attack_ratio']*100:.0f}%)")
     print(f"{'='*80}")
 
     # Set seed
@@ -489,7 +536,7 @@ def run_experiment(X_train, y_train, X_test, y_test, attack_categories_test,
                 client.setup_dp(exp_config['epsilon'], config.NUM_ROUNDS)
             return client.to_client()
 
-    # Metrics aggregation function - EXACT match to Phase 4
+    # Metrics aggregation
     def weighted_avg(metrics: List[Tuple[int, Metrics]]) -> Metrics:
         if not metrics:
             return {}
@@ -503,7 +550,6 @@ def run_experiment(X_train, y_train, X_test, y_test, attack_categories_test,
                 if total > 0:
                     aggregated[key] = sum(values) / total
 
-        # Max epsilon
         epsilon_values = [m.get('epsilon_consumed', 0.0) for _, m in metrics if 'epsilon_consumed' in m]
         if epsilon_values:
             aggregated['epsilon_consumed'] = max(epsilon_values)
@@ -522,35 +568,28 @@ def run_experiment(X_train, y_train, X_test, y_test, attack_categories_test,
         val.cpu().numpy() for _, val in init_model.state_dict().items()
     ])
 
-    # Strategy with FULL parameters (EXACT match to Phase 4)
+    # Strategy
     strategy_params = {
         "fraction_fit": config.CLIENT_FRACTION,
         "fraction_evaluate": 1.0,
         "min_fit_clients": config.MIN_FIT_CLIENTS,
         "min_available_clients": config.MIN_AVAILABLE_CLIENTS,
-        "evaluate_metrics_aggregation_fn": weighted_avg,  # CRITICAL
-        "fit_metrics_aggregation_fn": weighted_avg,        # CRITICAL
+        "evaluate_metrics_aggregation_fn": weighted_avg,
+        "fit_metrics_aggregation_fn": weighted_avg,
         "initial_parameters": initial_parameters,
     }
 
     strategy = MedianStrategy(**strategy_params)
 
-    print(f"Strategy: {exp_config['aggregator']}")
     print(f"Starting FL training...")
 
     # Run simulation
     start_time = time.time()
 
-    # Client resources optimized for T4 GPU
-    # T4 has 16GB memory, allocate conservatively to avoid OOM
     client_resources = {
         "num_cpus": 1,
-        "num_gpus": 0.1  # Each client uses 10% of GPU (allows 10 concurrent clients)
+        "num_gpus": 0.1 if torch.cuda.is_available() else 0.0
     }
-
-    if not torch.cuda.is_available():
-        print("⚠️  Running on CPU - this will be very slow!")
-        client_resources = {"num_cpus": 1, "num_gpus": 0.0}
 
     history = fl.simulation.start_simulation(
         client_fn=client_fn,
@@ -562,154 +601,53 @@ def run_experiment(X_train, y_train, X_test, y_test, attack_categories_test,
 
     total_time = time.time() - start_time
 
-    # Extract final metrics from history
-    final_f1 = 0.0
-    final_acc = 0.0
-    
-    if history.metrics_distributed:
-        if 'f1' in history.metrics_distributed:
-            f1_values = history.metrics_distributed['f1']
-            if f1_values:
-                final_f1 = f1_values[-1][1]
-                
-        if 'accuracy' in history.metrics_distributed:
-            acc_values = history.metrics_distributed['accuracy']
-            if acc_values:
-                final_acc = acc_values[-1][1]
-    
-    print(f"\n✓ Training complete!")
-    print(f"  Final F1 (from training): {final_f1:.4f}")
-    print(f"  Final Accuracy (from training): {final_acc:.4f}")
+    print(f"\n✓ Training complete! Time: {total_time:.1f}s")
 
-    # Collect predictions using a workaround:
-    # We'll create a client, let it get the final global model, then extract predictions
-    print("\nCollecting predictions for fairness analysis...")
-    
-    # The simplest approach: manually evaluate with a model that loads strategy parameters
-    eval_model = IntrusionDetectionMLP(
-        input_dim=input_dim,
-        hidden_dims=config.HIDDEN_DIMS,
-        dropout=config.DROPOUT_RATE
-    ).to(config.DEVICE)
-    
-    # Try to get parameters from strategy (FedAvg-based strategies should have this)
-    try:
-        # Check common parameter storage locations in Flower strategies
-        if hasattr(strategy, 'parameters') and strategy.parameters is not None:
-            params = parameters_to_ndarrays(strategy.parameters)
-            print("  ✓ Found parameters in strategy.parameters")
-        elif hasattr(strategy, '_parameters'):
-            params = parameters_to_ndarrays(strategy._parameters)
-            print("  ✓ Found parameters in strategy._parameters")
-        elif hasattr(strategy, 'current_parameters'):
-            params = parameters_to_ndarrays(strategy.current_parameters)
-            print("  ✓ Found parameters in strategy.current_parameters")
-        else:
-            # WORKAROUND: Clients have the trained model after simulation
-            # We'll manually create a client and use its trained state
-            print("  ⚠️ Cannot access strategy parameters directly")
-            print("  ⚠️ Using F1 from training as ground truth, skipping per-attack analysis")
-            
-            return {
-                'config': exp_config,
-                'final_f1': final_f1,
-                'final_accuracy': final_acc,
-                'total_time': total_time,
-                'y_pred': np.array([]),  # Empty - will skip per-attack analysis
-                'y_prob': np.array([]),
-                'y_true': y_test,
-                'attack_categories': attack_categories_test,
-                'note': 'Predictions unavailable - using aggregated metrics only'
-            }
-        
-        # Load parameters into evaluation model
-        params_dict = zip(eval_model.state_dict().keys(), params)
-        state_dict = {k: torch.tensor(v, device=config.DEVICE) for k, v in params_dict}
-        eval_model.load_state_dict(state_dict, strict=True)
-        eval_model.eval()
-        print("  ✓ Loaded trained model for evaluation")
-        
-    except Exception as e:
-        print(f"  ⚠️ Error loading parameters: {e}")
-        print("  Using aggregated F1 from training")
-        
-        return {
-            'config': exp_config,
-            'final_f1': final_f1,
-            'final_accuracy': final_acc,
-            'total_time': total_time,
-            'y_pred': np.array([]),
-            'y_prob': np.array([]),
-            'y_true': y_test,
-            'attack_categories': attack_categories_test,
-            'note': 'Parameter loading failed'
-        }
-    
-    # Now evaluate to collect predictions
-    test_dataset = TensorDataset(
-        torch.FloatTensor(X_test),
-        torch.FloatTensor(y_test).view(-1, 1)
-    )
-    test_loader = DataLoader(test_dataset, batch_size=config.BATCH_SIZE, shuffle=False)
-    
-    predictions = []
-    probabilities = []
-    labels = []
-
-    with torch.no_grad():
-        for data, target in test_loader:
-            data = data.to(config.DEVICE)
-            logits = eval_model(data)
-            probs = torch.sigmoid(logits)
-            preds = (probs > 0.5).float()
-
-            predictions.extend(preds.cpu().numpy().flatten())
-            probabilities.extend(probs.cpu().numpy().flatten())
-            labels.extend(target.numpy().flatten())
-
-    # Convert to arrays
-    y_pred = np.array(predictions)
-    y_prob = np.array(probabilities)
-    y_true = np.array(labels)
-
-    # Verify predictions match training F1
-    verification_f1 = f1_score(y_true, y_pred, zero_division=0)
-    verification_acc = accuracy_score(y_true, y_pred)
-    
-    print(f"  Verification F1: {verification_f1:.4f}")
-    print(f"  Verification Accuracy: {verification_acc:.4f}")
-    
-    # Check if verification matches training (should be within 0.01)
-    if abs(verification_f1 - final_f1) > 0.01:
-        print(f"  ⚠️ WARNING: Verification mismatch! Training F1={final_f1:.4f}, Verification F1={verification_f1:.4f}")
-        print(f"  Using training F1 as ground truth.")
+    # KEY FIX: Get final parameters and evaluate directly
+    final_parameters = None
+    if history.parameters:
+        final_parameters = parameters_to_ndarrays(history.parameters)
+        print(f"✓ Final parameters extracted from history")
     else:
-        print(f"  ✓ Predictions verified!")
-    
-    print(f"  Total time: {total_time:.1f}s")
-    print(f"  Predictions collected: {len(y_pred)}")
+        print("⚠ Warning: Could not extract final parameters from history")
+        print("  Attempting to retrieve from strategy...")
+        # Fallback: try to get from strategy
+        if hasattr(strategy, 'current_parameters') and strategy.current_parameters:
+            final_parameters = parameters_to_ndarrays(strategy.current_parameters)
+            print(f"✓ Final parameters extracted from strategy")
+
+    # Evaluate final model directly
+    if final_parameters is not None:
+        y_pred, y_prob, final_f1, final_acc = evaluate_final_model(
+            final_parameters, X_test, y_test, input_dim
+        )
+    else:
+        print("✗ ERROR: Could not retrieve final model parameters!")
+        y_pred = np.array([])
+        y_prob = np.array([])
+        final_f1 = 0.0
+        final_acc = 0.0
 
     return {
         'config': exp_config,
-        'final_f1': final_f1,  # Use training F1 (ground truth)
-        'final_accuracy': final_acc,  # Use training accuracy
+        'final_f1': final_f1,
+        'final_accuracy': final_acc,
         'total_time': total_time,
         'y_pred': y_pred,
         'y_prob': y_prob,
-        'y_true': y_true,
+        'y_true': y_test,
         'attack_categories': attack_categories_test
     }
 
 
 # ============================================================================
-# PER-ATTACK-TYPE DETECTION ANALYSIS
+# FAIRNESS ANALYSIS (unchanged from original)
 # ============================================================================
 
 def compute_detection_rates(y_pred: np.ndarray, y_true: np.ndarray,
                             attack_categories: np.ndarray) -> Dict:
     """Compute detection rate per attack category"""
-    
-    # Check if predictions are available
+
     if len(y_pred) == 0:
         return {}
 
@@ -749,18 +687,15 @@ def analyze_fairness(results: List[Dict], output_dir: Path):
     print(f"{'='*80}\n")
 
     all_detection_rates = []
-    skipped_experiments = []
 
     for result in results:
         exp_name = result['config']['name']
         epsilon = result['config']['epsilon']
-        
-        # Check if predictions are available
+
         if 'y_pred' not in result or len(result['y_pred']) == 0:
             print(f"\n{exp_name} (ε={epsilon}):")
             print(f"  Overall F1: {result['final_f1']:.4f}")
-            print(f"  ⚠️ Per-attack analysis unavailable (predictions not collected)")
-            skipped_experiments.append(exp_name)
+            print(f"  ✗ Per-attack analysis unavailable")
             continue
 
         detection = compute_detection_rates(
@@ -768,9 +703,8 @@ def analyze_fairness(results: List[Dict], output_dir: Path):
             result['y_true'],
             result['attack_categories']
         )
-        
+
         if not detection:
-            print(f"\n{exp_name}: No detection rates computed")
             continue
 
         print(f"\n{exp_name} (ε={epsilon}):")
@@ -803,21 +737,16 @@ def analyze_fairness(results: List[Dict], output_dir: Path):
             gap = max_rate - min_rate
             di = min_rate / max_rate if max_rate > 0 else 0
 
-            print(f"\n  Fairness Metrics (Attack Classes):")
+            print(f"\n  Fairness Metrics:")
             print(f"    Min Detection: {min_rate*100:.1f}%")
             print(f"    Max Detection: {max_rate*100:.1f}%")
-            print(f"    Performance Gap: {gap*100:.1f}%")
-            print(f"    Disparate Impact: {di:.3f} {'✓' if di >= 0.8 else '✗ VIOLATES 80% rule'}")
-    
-    if skipped_experiments:
-        print(f"\n⚠️ Note: {len(skipped_experiments)} experiments skipped due to missing predictions")
-    
+            print(f"    Gap: {gap*100:.1f}%")
+            print(f"    Disparate Impact: {di:.3f} {'✓' if di >= 0.8 else '✗'}")
+
     if not all_detection_rates:
-        print("\n⚠️ ERROR: No detection rates computed for any experiment!")
-        print("  Per-attack fairness analysis cannot be performed.")
+        print("\n✗ ERROR: No detection rates computed!")
         return None
 
-    # Create DataFrame
     df = pd.DataFrame(all_detection_rates)
     df.to_csv(output_dir / 'detection_rates.csv', index=False)
     print(f"\n✓ Saved: {output_dir / 'detection_rates.csv'}")
@@ -902,8 +831,8 @@ def create_visualizations(df: pd.DataFrame, output_dir: Path):
     x = np.arange(len(available_eps))
     width = 0.35
 
-    bars1 = ax.bar(x - width/2, common_rates, width, label='Common Attacks', color='#2ca02c', alpha=0.8)
-    bars2 = ax.bar(x + width/2, rare_rates, width, label='Rare Attacks', color='#d62728', alpha=0.8)
+    ax.bar(x - width/2, common_rates, width, label='Common Attacks', color='#2ca02c', alpha=0.8)
+    ax.bar(x + width/2, rare_rates, width, label='Rare Attacks', color='#d62728', alpha=0.8)
 
     ax.set_xlabel('Privacy Level', fontsize=12, fontweight='bold')
     ax.set_ylabel('Avg Detection Rate (%)', fontsize=12, fontweight='bold')
@@ -913,11 +842,6 @@ def create_visualizations(df: pd.DataFrame, output_dir: Path):
     ax.legend()
     ax.set_ylim(0, 105)
     ax.grid(True, alpha=0.3, axis='y')
-
-    for i, (c, r) in enumerate(zip(common_rates, rare_rates)):
-        gap = c - r
-        if abs(gap) > 1:
-            ax.annotate(f'Gap: {gap:.1f}%', xy=(i, max(c, r) + 3), ha='center', fontsize=9)
 
     # 4. Fairness Disparity
     ax = axes[1, 1]
@@ -979,12 +903,6 @@ def generate_report(df: pd.DataFrame, results: List[Dict], output_dir: Path):
         f.write("Per-Attack-Type Detection Rates in FL-NIDS\n")
         f.write("=" * 80 + "\n\n")
 
-        f.write("METHODOLOGY:\n")
-        f.write("-" * 80 + "\n")
-        f.write("Binary classification model predicting Attack (1) vs Normal (0)\n")
-        f.write("Detection rate = % of attack samples correctly identified as attacks\n")
-        f.write("Fairness measured across attack categories\n\n")
-
         attacks_df = df[df['attack_type'] != 'Normal']
 
         for result in results:
@@ -999,41 +917,20 @@ def generate_report(df: pd.DataFrame, results: List[Dict], output_dir: Path):
 
             subset = attacks_df[attacks_df['epsilon_str'] == eps_str]
 
-            f.write("Detection Rates by Attack Type:\n")
-            f.write("-" * 40 + "\n")
+            if len(subset) > 0:
+                f.write("Detection Rates by Attack Type:\n")
+                f.write("-" * 40 + "\n")
 
-            for _, row in subset.iterrows():
-                f.write(f"  {row['attack_type']:15s}: {row['detection_rate']*100:5.1f}%\n")
+                for _, row in subset.iterrows():
+                    f.write(f"  {row['attack_type']:15s}: {row['detection_rate']*100:5.1f}%\n")
 
-            rates = subset['detection_rate'].values
-            if len(rates) > 0 and max(rates) > 0:
-                f.write(f"\nFairness Metrics:\n")
-                f.write(f"  Min Detection: {min(rates)*100:.1f}%\n")
-                f.write(f"  Max Detection: {max(rates)*100:.1f}%\n")
-                f.write(f"  Gap: {(max(rates)-min(rates))*100:.1f}%\n")
-                f.write(f"  Disparate Impact: {min(rates)/max(rates):.3f}\n")
-
-        f.write(f"\n{'='*80}\n")
-        f.write("SUMMARY\n")
-        f.write(f"{'='*80}\n\n")
-
-        common = ['Generic', 'Exploits', 'DoS']
-        rare = ['Analysis', 'Backdoor', 'Shellcode', 'Worms']
-
-        f.write(f"{'Privacy Level':<15} {'Overall F1':<12} {'Common Avg':<12} {'Rare Avg':<12} {'Gap':<10}\n")
-        f.write("-" * 70 + "\n")
-
-        for eps_str in ['No DP', 'ε=5.0', 'ε=3.0', 'ε=1.0']:
-            subset = attacks_df[attacks_df['epsilon_str'] == eps_str]
-            if len(subset) == 0:
-                continue
-
-            overall_f1 = subset['overall_f1'].iloc[0]
-            common_rate = subset[subset['attack_type'].isin(common)]['detection_rate'].mean()
-            rare_rate = subset[subset['attack_type'].isin(rare)]['detection_rate'].mean()
-            gap = common_rate - rare_rate
-
-            f.write(f"{eps_str:<15} {overall_f1:>10.4f} {common_rate*100:>10.1f}% {rare_rate*100:>10.1f}% {gap*100:>8.1f}%\n")
+                rates = subset['detection_rate'].values
+                if len(rates) > 0 and max(rates) > 0:
+                    f.write(f"\nFairness Metrics:\n")
+                    f.write(f"  Min Detection: {min(rates)*100:.1f}%\n")
+                    f.write(f"  Max Detection: {max(rates)*100:.1f}%\n")
+                    f.write(f"  Gap: {(max(rates)-min(rates))*100:.1f}%\n")
+                    f.write(f"  Disparate Impact: {min(rates)/max(rates):.3f}\n")
 
     print(f"✓ Saved: {report_path}")
 
@@ -1046,24 +943,9 @@ def main():
     """Main execution"""
 
     print("\n" + "=" * 80)
-    print("FAIRNESS VALIDATION FOR FL-NIDS (CORRECTED)")
-    print("Exact match to Phase 4 architecture")
+    print("FAIRNESS VALIDATION FOR FL-NIDS (FIXED)")
+    print("Direct final model evaluation")
     print("=" * 80 + "\n")
-
-    # Verify GPU
-    print("SYSTEM CONFIGURATION")
-    print("-" * 80)
-    print(f"PyTorch version: {torch.__version__}")
-    print(f"CUDA available: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
-        print(f"CUDA version: {torch.version.cuda}")
-        print(f"GPU device: {torch.cuda.get_device_name(0)}")
-        print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-        print(f"Current device: {config.DEVICE}")
-    else:
-        print("⚠️  WARNING: No GPU detected! Training will be extremely slow.")
-        print("   Please enable GPU in Colab: Runtime > Change runtime type > T4 GPU")
-    print("-" * 80 + "\n")
 
     # Setup
     output_dir = Path(config.OUTPUT_DIR)
@@ -1108,23 +990,18 @@ def main():
 
     # Analyze
     df = analyze_fairness(all_results, output_dir)
-    
+
     if df is not None and len(df) > 0:
         create_visualizations(df, output_dir)
         generate_report(df, all_results, output_dir)
-        
+
         print(f"\n{'='*80}")
         print("✓ FAIRNESS VALIDATION COMPLETE!")
         print(f"{'='*80}\n")
     else:
         print(f"\n{'='*80}")
-        print("⚠️ FAIRNESS ANALYSIS INCOMPLETE")
-        print("  Overall F1 scores were collected, but per-attack analysis failed.")
-        print("  This may be due to Flower version incompatibility.")
+        print("⚠ FAIRNESS ANALYSIS INCOMPLETE")
         print(f"{'='*80}\n")
-        print("Results still available:")
-        for result in all_results:
-            print(f"  {result['config']['name']}: F1 = {result['final_f1']:.4f}")
 
 
 if __name__ == "__main__":
