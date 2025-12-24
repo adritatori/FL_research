@@ -316,7 +316,7 @@ else:          η = 0.005 (Low noise)
 | Aspect | Phase 4 (Threat Analysis) | Fairness Validation |
 |--------|---------------------------|---------------------|
 | **Purpose** | Robustness under attacks | Per-attack-type fairness |
-| **Epsilon values** | {3.0, 5.0, ∞} | {1.0, 3.0, 5.0, ∞} |
+| **Epsilon values** | {0.3, 0.5, 1.0, 3.0, 5.0, ∞} | {1.0, 3.0, 5.0, ∞} |
 | **Aggregators** | All 4 (FedAvg, TM, Median, Krum) | Median only |
 | **Attacks** | label_flip + model_poisoning | label_flip only |
 | **Attack ratios** | {0.2, 0.4} | 0.4 only |
