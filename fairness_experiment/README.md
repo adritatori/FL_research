@@ -56,9 +56,11 @@ pip install torch numpy pandas scikit-learn flwr opacus
 
 ## Data Requirements
 
-The script expects the following files in the current directory:
+The script expects the following files in `/content/drive/MyDrive/IDSDatasets/UNSW 15/`:
 - `UNSW_NB15_training-set.csv`
 - `UNSW_NB15_testing-set.csv`
+
+**Note:** If your data is in a different location, update the `DATA_DIR` constant in `run_fairness_validation.py` (line 95).
 
 Both files must contain:
 - Feature columns
