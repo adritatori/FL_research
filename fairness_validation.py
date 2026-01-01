@@ -587,8 +587,8 @@ def run_experiment(X_train, y_train, X_test, y_test, attack_categories_test,
     start_time = time.time()
 
     client_resources = {
-        "num_cpus": 0.4,  # A100: allows multiple concurrent clients
-        "num_gpus": 0.09 if torch.cuda.is_available() else 0.0  # A100: ~11 actors possible, plenty for 10 clients
+        "num_cpus": 0.2,  # A100: allows 10 actors (2 CPUs / 0.2 = 10)
+        "num_gpus": 0.09 if torch.cuda.is_available() else 0.0  # A100: ~11 actors (1 GPU / 0.09 = 11)
     }
 
     history = fl.simulation.start_simulation(
