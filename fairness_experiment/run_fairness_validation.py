@@ -92,7 +92,7 @@ def get_adaptive_lr(epsilon: float) -> float:
 # Paths
 RESULTS_DIR = Path("fairness_experiment/results")
 MODELS_DIR = RESULTS_DIR / "models"
-DATA_DIR = Path(".")  # Assumes data files are in current directory
+DATA_DIR = Path("/content/drive/MyDrive/IDSDatasets/UNSW 15")  # Google Drive path
 
 # ============================================================================
 # MODEL ARCHITECTURE (MUST MATCH PHASE 4)
