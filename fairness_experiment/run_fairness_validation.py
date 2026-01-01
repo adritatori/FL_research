@@ -585,7 +585,7 @@ def run_single_experiment(epsilon: float, seed: int, run_id: int,
         num_clients=NUM_CLIENTS,
         config=fl.server.ServerConfig(num_rounds=NUM_ROUNDS),
         strategy=strategy,
-        client_resources={"num_cpus": 0.5, "num_gpus": 0.25 if device == "cuda" else 0.0}  # Colab T4: max 4 actors (safer for VRAM)
+        client_resources={"num_cpus": 0.4, "num_gpus": 0.09 if device == "cuda" else 0.0}  # A100: allows 10+ clients with plenty of VRAM headroom
     )
 
     # Get final model parameters
