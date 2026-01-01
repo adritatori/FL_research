@@ -304,8 +304,11 @@ class FLClient(fl.client.NumPyClient):
         self.set_parameters(parameters)
         self.model.train()
 
+        total_loss = 0.0
+        num_batches = 0
+
         for epoch in range(self.local_epochs):
-            for batch_X, batch_y in self.trainloader:
+            for batch_idx, (batch_X, batch_y) in enumerate(self.trainloader):
                 batch_X = batch_X.to(self.device)
                 batch_y = batch_y.to(self.device)
 
@@ -315,13 +318,23 @@ class FLClient(fl.client.NumPyClient):
                 loss.backward()
                 self.optimizer.step()
 
+                total_loss += loss.item()
+                num_batches += 1
+
+                # Progress logging every 10 batches
+                if (batch_idx + 1) % 10 == 0:
+                    avg_loss = total_loss / num_batches
+                    print(f"  Epoch {epoch+1}/{self.local_epochs}, Batch {batch_idx+1}, Avg Loss: {avg_loss:.4f}")
+
         # Get epsilon spent if using DP
         epsilon_spent = float('inf')
         if self.privacy_engine is not None:
             epsilon_spent = self.privacy_engine.get_epsilon(self.delta)
 
+        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
         return self.get_parameters(config), len(self.dataset), {
-            "epsilon_spent": epsilon_spent
+            "epsilon_spent": epsilon_spent,
+            "train_loss": avg_loss
         }
 
     def evaluate(self, parameters, config):
