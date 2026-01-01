@@ -585,7 +585,7 @@ def run_single_experiment(epsilon: float, seed: int, run_id: int,
         num_clients=NUM_CLIENTS,
         config=fl.server.ServerConfig(num_rounds=NUM_ROUNDS),
         strategy=strategy,
-        client_resources={"num_cpus": 1, "num_gpus": 0.1 if device == "cuda" else 0}
+        client_resources={"num_cpus": 0.2, "num_gpus": 0.1 if device == "cuda" else 0}
     )
 
     # Get final model parameters
