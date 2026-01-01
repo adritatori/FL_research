@@ -598,7 +598,7 @@ def run_single_experiment(epsilon: float, seed: int, run_id: int,
         num_clients=NUM_CLIENTS,
         config=fl.server.ServerConfig(num_rounds=NUM_ROUNDS),
         strategy=strategy,
-        client_resources={"num_cpus": 0.2, "num_gpus": 0.0}  # Minimal allocation to prevent Ray scheduling deadlock
+        client_resources={"num_cpus": 0.4, "num_gpus": 0.09 if device == "cuda" else 0.0}  # A100: allows 10+ clients with plenty of VRAM headroom
     )
 
     # Get final model parameters
