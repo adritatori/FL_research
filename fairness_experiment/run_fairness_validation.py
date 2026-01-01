@@ -162,14 +162,42 @@ def preprocess_data(train_df: pd.DataFrame, test_df: pd.DataFrame) -> Tuple:
     exclude_cols = ['label', 'attack_cat']
     feature_cols = [col for col in train_df.columns if col not in exclude_cols]
 
-    # Separate features, labels, and attack categories
-    X_train = train_df[feature_cols].values
+    # Separate features and labels
+    train_features = train_df[feature_cols].copy()
+    test_features = test_df[feature_cols].copy()
+
     y_train = train_df['label'].values
     attack_cat_train = train_df['attack_cat'].map(ATTACK_CATEGORIES).values
-
-    X_test = test_df[feature_cols].values
     y_test = test_df['label'].values
     attack_cat_test = test_df['attack_cat'].map(ATTACK_CATEGORIES).values
+
+    # Identify categorical columns (object/string dtype)
+    categorical_cols = train_features.select_dtypes(include=['object']).columns.tolist()
+
+    if categorical_cols:
+        print(f"Encoding categorical columns: {categorical_cols}")
+        # Apply one-hot encoding to categorical columns
+        # Use pd.get_dummies which handles train/test consistency
+        train_features = pd.get_dummies(train_features, columns=categorical_cols, drop_first=True)
+        test_features = pd.get_dummies(test_features, columns=categorical_cols, drop_first=True)
+
+        # Ensure train and test have the same columns (in case of missing categories)
+        # Add missing columns to test set
+        missing_cols = set(train_features.columns) - set(test_features.columns)
+        for col in missing_cols:
+            test_features[col] = 0
+
+        # Add missing columns to train set (rare case)
+        missing_cols = set(test_features.columns) - set(train_features.columns)
+        for col in missing_cols:
+            train_features[col] = 0
+
+        # Ensure column order matches
+        test_features = test_features[train_features.columns]
+
+    # Convert to numpy arrays
+    X_train = train_features.values
+    X_test = test_features.values
 
     # Standardize features
     scaler = StandardScaler()
